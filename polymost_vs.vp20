@@ -1,0 +1,30 @@
+!!VP1.1
+# cgc version 3.1.0013, build date Apr 18 2012
+# command line args: -profile vp20
+# source file: polymost_vs.vs.cg
+#vendor NVIDIA Corporation
+#version 3.1.0.13
+#profile vp20
+#program main
+#semantic main.u_mvp
+#semantic main.u_colour
+#var float4 I.pos : $vin.POSITION : ATTR0 : 0 : 1
+#var float2 I.tex : $vin.TEXCOORD : TEXCOORD0 : 0 : 1
+#var float4x4 u_mvp :  : c[0], 4 : 1 : 1
+#var float4 u_colour :  : c[4] : 2 : 1
+#var float4 main.pos : $vout.POSITION : HPOS : -1 : 1
+#var float4 main.col : $vout.COLOR : COL0 : -1 : 1
+#var float4 main.tex0 : $vout.TEXCOORD0 : TEX0 : -1 : 1
+#const c[5] = 0 1
+MUL   R0, v[0].y, c[1];
+MAD   R0, v[0].x, c[0], R0;
+MAD   R0, v[0].z, c[2], R0;
+ADD   R0, R0, c[3];
+RCP   R1.x, R0.w;
+MUL   o[HPOS].xyz, R0, R1.x;
+MOV   o[HPOS].w, R0;
+MOV   o[COL0], c[4];
+MOV   o[TEX0].xy, v[8];
+MOV   o[TEX0].zw, c[5].xyxy;
+END
+# 10 instructions, 0 R-regs

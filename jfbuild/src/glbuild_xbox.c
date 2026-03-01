@@ -111,9 +111,56 @@ static struct xbox_texture {
 	void *addr;        // contiguous GPU memory
 	int width, height, pitch;
 	int allocated;
+	int swizzled;      // 1 = SZ (Morton-swizzled) format, supports REPEAT wrap
 	int wrap_s, wrap_t;
 	int min_filter, mag_filter;
 } texture_table[MAX_TEXTURES];
+
+// ---- NV2A texture swizzling (Morton code) ----
+// NV2A's swizzled (SZ_) texture format interleaves x and y coordinate bits
+// for cache-efficient 2D access. Required for REPEAT wrapping support.
+
+static inline int is_pow2(int v) { return v > 0 && (v & (v - 1)) == 0; }
+
+// Swizzle a linear ARGB8 image into NV2A Morton-code order.
+// dst must be w*h*4 bytes. w and h must be powers of two.
+// NV2A swizzle address for non-square POT textures.
+// Interleave bits up to min(log2w, log2h), then append remaining
+// bits of the larger dimension as MSBs.
+static inline unsigned int nv2a_swizzle_addr(int x, int y, int log2w, int log2h)
+{
+	int min_log2 = log2w < log2h ? log2w : log2h;
+	unsigned int offset = 0;
+	// Standard Morton interleave for the lower min_log2 bits
+	for (int i = 0; i < min_log2; i++) {
+		offset |= ((x >> i) & 1) << (2 * i);
+		offset |= ((y >> i) & 1) << (2 * i + 1);
+	}
+	// Remaining bits of the larger dimension appended as high bits
+	int shift = 2 * min_log2;
+	if (log2w > log2h)
+		offset |= ((unsigned int)x >> min_log2) << shift;
+	else if (log2h > log2w)
+		offset |= ((unsigned int)y >> min_log2) << shift;
+	return offset;
+}
+
+static void swizzle_rect(const void *src, int src_pitch,
+                         void *dst, int w, int h, int bpp)
+{
+	const uint8_t *s = (const uint8_t *)src;
+	uint8_t *d = (uint8_t *)dst;
+	int log2w = 0, log2h = 0;
+	{ int v = w; while (v > 1) { v >>= 1; log2w++; } }
+	{ int v = h; while (v > 1) { v >>= 1; log2h++; } }
+
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			unsigned int offset = nv2a_swizzle_addr(x, y, log2w, log2h) * bpp;
+			memcpy(d + offset, s + y * src_pitch + x * bpp, bpp);
+		}
+	}
+}
 
 // ---- Buffer table (CPU-side + GPU-mapped) ----
 #define MAX_BUFFERS 64
@@ -140,6 +187,7 @@ static GLuint null_texture_id = 0;
 static int viewport_set_count = 0;
 static int frame_draw_count = 0;   // per-frame draw counter (reset in glClear)
 static int frame_skip_count = 0;   // per-frame skipped draws (early returns)
+static int frame_clip_count = 0;   // per-frame clipped draws (near-plane)
 static int global_frame_num = 0;   // monotonic frame counter
 static int draw_since_sync = 0;    // draws since last GPU sync (push buffer overflow prevention)
 
@@ -156,7 +204,7 @@ static float vp_x, vp_y, vp_w, vp_h;
 static int vp_valid = 0;
 
 // ---- Compiled shaders (generated from .cg by nxdk toolchain) ----
-// 9 instructions × 4 uint32_t per instruction = 36 words (includes perspective divide)
+// 11 instructions × 4 uint32_t per instruction = 44 words (w-clamp + perspective divide + TEX0.q=1)
 static uint32_t vs_program[] = {
 	#include "polymost_vs.inl"
 };
@@ -415,14 +463,15 @@ static void APIENTRY xbox_glClear(GLbitfield mask)
 			xbox_log("Xbox: first frame reset done\n");
 	}
 
-	// Per-frame draw stats (log first 10 frames)
-	if (frame_number > 0 && frame_number <= 10) {
-		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d vp_valid=%d vp=(%d,%d,%d,%d)\n",
-			frame_number - 1, frame_draw_count, frame_skip_count,
-			vp_valid, (int)vp_x, (int)vp_y, (int)vp_w, (int)vp_h);
+	// Per-frame draw stats (log first 60 frames to capture movement)
+	if (frame_number > 0 && frame_number <= 60) {
+		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d vp=(%d,%d,%d,%d)\n",
+			frame_number - 1, frame_draw_count, frame_skip_count, frame_clip_count,
+			(int)vp_x, (int)vp_y, (int)vp_w, (int)vp_h);
 	}
 	frame_draw_count = 0;
 	frame_skip_count = 0;
+	frame_clip_count = 0;
 	global_frame_num = frame_number;
 	frame_number++;
 
@@ -709,10 +758,11 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 	int unit = (gl_state.active_texture == GL_TEXTURE1) ? 1 : 0;
 	GLuint id = gl_state.bound_texture[unit];
 
+	int use_swizzle_log = is_pow2(w) && is_pow2(h);
 	static int tex_upload_count = 0;
 	if (tex_upload_count < 10) {
-		xbox_log("Xbox: glTexImage2D id=%d %dx%d fmt=%x px=%p\n",
-			id, w, h, fmt, px);
+		xbox_log("Xbox: glTexImage2D id=%d %dx%d fmt=%x %s px=%p\n",
+			id, w, h, fmt, use_swizzle_log ? "SZ" : "LU", px);
 		tex_upload_count++;
 	}
 
@@ -727,12 +777,18 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 		tex->allocated = 0;
 	}
 
-	// NV2A requires texture pitch aligned to 64 bytes minimum.
+	// POT textures use swizzled (Morton-code) format which supports REPEAT wrap.
+	// NPOT textures must stay linear (LU_IMAGE) with CLAMP wrap only.
+	int use_swizzle = is_pow2(w) && is_pow2(h);
+
+	// NV2A requires texture pitch aligned to 64 bytes minimum (linear only).
+	// Swizzled textures don't use pitch — data is Morton-ordered, size = w*h*bpp.
 	int src_pitch = w * 4;
-	int pitch = (src_pitch + 63) & ~63;
+	int pitch = use_swizzle ? (w * 4) : ((src_pitch + 63) & ~63);
+	int alloc_size = use_swizzle ? (w * h * 4) : (pitch * h);
 
 	if (!tex->allocated) {
-		tex->addr = MmAllocateContiguousMemoryEx(pitch * h, 0, MAXRAM, 0,
+		tex->addr = MmAllocateContiguousMemoryEx(alloc_size, 0, MAXRAM, 0,
 			PAGE_READWRITE | PAGE_WRITECOMBINE);
 		if (!tex->addr) {
 			buildprintf("xbox_glTexImage2D: MmAlloc failed for %dx%d texture\n", w, h);
@@ -742,40 +798,62 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 		tex->height = h;
 		tex->pitch = pitch;
 		tex->allocated = 1;
+		tex->swizzled = use_swizzle;
 	}
 
 	if (px) {
-		if (fmt == GL_BGRA) {
-			// Already in NV2A native A8R8G8B8 format — row-by-row for pitch padding
-			const unsigned char *src = (const unsigned char *)px;
-			unsigned char *dst = (unsigned char *)tex->addr;
-			for (int row = 0; row < h; row++) {
-				memcpy(dst, src, src_pitch);
-				src += src_pitch;
-				dst += pitch;
-			}
-		} else if (fmt == GL_RGBA) {
-			// Swizzle RGBA → BGRA (swap R and B) — row-by-row for pitch padding
-			const unsigned char *src = (const unsigned char *)px;
-			unsigned char *dst = (unsigned char *)tex->addr;
-			for (int row = 0; row < h; row++) {
-				for (int x = 0; x < w; x++) {
-					dst[x*4+0] = src[x*4+2]; // B
-					dst[x*4+1] = src[x*4+1]; // G
-					dst[x*4+2] = src[x*4+0]; // R
-					dst[x*4+3] = src[x*4+3]; // A
+		if (use_swizzle) {
+			// POT texture: convert to Morton-swizzled layout for REPEAT wrap support.
+			// First build a linear BGRA buffer, then swizzle into GPU memory.
+			unsigned char *linear = (unsigned char *)malloc(w * h * 4);
+			if (!linear) return;
+
+			if (fmt == GL_BGRA) {
+				memcpy(linear, px, w * h * 4);
+			} else if (fmt == GL_RGBA) {
+				const unsigned char *sp = (const unsigned char *)px;
+				for (int i = 0; i < w * h; i++) {
+					linear[i*4+0] = sp[i*4+2]; // B
+					linear[i*4+1] = sp[i*4+1]; // G
+					linear[i*4+2] = sp[i*4+0]; // R
+					linear[i*4+3] = sp[i*4+3]; // A
 				}
-				src += src_pitch;
-				dst += pitch;
+			} else {
+				memcpy(linear, px, w * h * 4);
 			}
+			swizzle_rect(linear, w * 4, tex->addr, w, h, 4);
+			free(linear);
 		} else {
-			// Other formats: row-by-row copy
-			const unsigned char *src = (const unsigned char *)px;
-			unsigned char *dst = (unsigned char *)tex->addr;
-			for (int row = 0; row < h; row++) {
-				memcpy(dst, src, src_pitch);
-				src += src_pitch;
-				dst += pitch;
+			// NPOT texture: linear row-by-row copy with pitch padding
+			if (fmt == GL_BGRA) {
+				const unsigned char *src = (const unsigned char *)px;
+				unsigned char *dst = (unsigned char *)tex->addr;
+				for (int row = 0; row < h; row++) {
+					memcpy(dst, src, src_pitch);
+					src += src_pitch;
+					dst += pitch;
+				}
+			} else if (fmt == GL_RGBA) {
+				const unsigned char *src = (const unsigned char *)px;
+				unsigned char *dst = (unsigned char *)tex->addr;
+				for (int row = 0; row < h; row++) {
+					for (int x = 0; x < w; x++) {
+						dst[x*4+0] = src[x*4+2]; // B
+						dst[x*4+1] = src[x*4+1]; // G
+						dst[x*4+2] = src[x*4+0]; // R
+						dst[x*4+3] = src[x*4+3]; // A
+					}
+					src += src_pitch;
+					dst += pitch;
+				}
+			} else {
+				const unsigned char *src = (const unsigned char *)px;
+				unsigned char *dst = (unsigned char *)tex->addr;
+				for (int row = 0; row < h; row++) {
+					memcpy(dst, src, src_pitch);
+					src += src_pitch;
+					dst += pitch;
+				}
 			}
 		}
 		// Flush CPU write-combining buffers so GPU sees texture data
@@ -796,23 +874,48 @@ static void APIENTRY xbox_glTexSubImage2D(GLenum target, GLint level,
 
 	struct xbox_texture *tex = &texture_table[id];
 	const unsigned char *src = (const unsigned char *)px;
-	unsigned char *dst = (unsigned char *)tex->addr + yo * tex->pitch + xo * 4;
 
-	for (int row = 0; row < h; row++) {
-		if (fmt == GL_BGRA) {
-			memcpy(dst, src, w * 4);
-		} else if (fmt == GL_RGBA) {
-			for (int i = 0; i < w; i++) {
-				dst[i*4+0] = src[i*4+2]; // B
-				dst[i*4+1] = src[i*4+1]; // G
-				dst[i*4+2] = src[i*4+0]; // R
-				dst[i*4+3] = src[i*4+3]; // A
+	if (tex->swizzled) {
+		// Swizzled texture: write each pixel to its NV2A Morton-code offset.
+		uint8_t *d = (uint8_t *)tex->addr;
+		int log2w = 0, log2h = 0;
+		{ int v = tex->width; while (v > 1) { v >>= 1; log2w++; } }
+		{ int v = tex->height; while (v > 1) { v >>= 1; log2h++; } }
+		for (int row = 0; row < h; row++) {
+			int gy = yo + row;
+			for (int col = 0; col < w; col++) {
+				int gx = xo + col;
+				unsigned int off = nv2a_swizzle_addr(gx, gy, log2w, log2h) * 4;
+				if (fmt == GL_RGBA) {
+					d[off+0] = src[col*4+2]; // B
+					d[off+1] = src[col*4+1]; // G
+					d[off+2] = src[col*4+0]; // R
+					d[off+3] = src[col*4+3]; // A
+				} else {
+					memcpy(d + off, src + col*4, 4);
+				}
 			}
-		} else {
-			memcpy(dst, src, w * 4);
+			src += w * 4;
 		}
-		src += w * 4;
-		dst += tex->pitch;
+	} else {
+		// Linear texture: simple row-by-row copy
+		unsigned char *dst = (unsigned char *)tex->addr + yo * tex->pitch + xo * 4;
+		for (int row = 0; row < h; row++) {
+			if (fmt == GL_BGRA) {
+				memcpy(dst, src, w * 4);
+			} else if (fmt == GL_RGBA) {
+				for (int i = 0; i < w; i++) {
+					dst[i*4+0] = src[i*4+2]; // B
+					dst[i*4+1] = src[i*4+1]; // G
+					dst[i*4+2] = src[i*4+0]; // R
+					dst[i*4+3] = src[i*4+3]; // A
+				}
+			} else {
+				memcpy(dst, src, w * 4);
+			}
+			src += w * 4;
+			dst += tex->pitch;
+		}
 	}
 	// Flush CPU write-combining buffers so GPU sees texture data
 	__asm__ volatile("sfence" ::: "memory");
@@ -1223,6 +1326,11 @@ static void mat4_multiply(float *out, const float *a, const float *b)
 // NV2A in PROGRAM mode: the vertex shader must output screen-space coordinates.
 // This matrix transforms from NDC [-1,1] to screen pixels + depth buffer range.
 //
+// Z mapping: NDC z [-1,1] → depth [0, 65536] via z_depth = z_ndc * 32768 + 32768.
+// Polymost's projection produces NDC z in approx [-1, 0] for visible geometry.
+// Previous mapping (scale=65536, offset=0) clamped ALL near geometry to depth=0,
+// breaking depth testing entirely (every draw overwrote every pixel).
+//
 // IMPORTANT: Polymost sets glViewport to logical resolution (e.g. 320x240)
 // but the NV2A framebuffer is the physical display (e.g. 640x480).
 // We scale the viewport to physical dimensions so rendering fills the screen.
@@ -1249,10 +1357,10 @@ static void build_viewport_matrix(float *out)
 	memset(out, 0, 16 * sizeof(float));
 	out[0]  = phys_w / 2.0f;           // [0][0] = half-width
 	out[5]  = phys_h / -2.0f;          // [1][1] = negative half-height (Y flip)
-	out[10] = 65536.0f;                // [2][2] = z range (matching mesh sample)
+	out[10] = 32768.0f;                // [2][2] = z_scale: half of depth range
 	out[12] = phys_x + phys_w / 2.0f;  // [3][0] = x center
 	out[13] = phys_y + phys_h / 2.0f;  // [3][1] = y center
-	out[14] = 0.0f;                     // [3][2] = z min
+	out[14] = 32768.0f;                // [3][2] = z_offset: maps NDC z [-1,1] to [0,65536]
 	out[15] = 1.0f;                     // [3][3]
 }
 
@@ -1283,14 +1391,37 @@ static void xbox_clear_attrib(unsigned int index)
 	pb_end(p);
 }
 
-// NV2A texture format for uncompressed ARGB8 (LU_IMAGE).
-// Matches the proven mesh sample value 0x0001122a exactly:
+// NV2A texture format for uncompressed ARGB8 (LU_IMAGE) — linear, NPOT.
 // CONTEXT_DMA=2, BORDER_SOURCE=COLOR, DIMENSIONALITY=2D,
-// COLOR=LU_IMAGE_A8R8G8B8, MIPMAP_LEVELS=1, BASE_SIZE_U=0, BASE_SIZE_V=0
+// COLOR=LU_IMAGE_A8R8G8B8 (0x12), MIPMAP_LEVELS=1, BASE_SIZE_U=0, BASE_SIZE_V=0
 // BASE_SIZE fields are 0 because NPOT_SIZE/NPOT_PITCH handle dimensions.
 static uint32_t xbox_tex_format_argb8(void)
 {
 	return 0x0001122a;
+}
+
+// NV2A texture format for uncompressed ARGB8 (SZ) — swizzled, POT only.
+// Swizzled textures support REPEAT wrapping (linear textures do NOT).
+// Register layout (from nv_regs.h):
+//   [1:0]   CONTEXT_DMA = 2
+//   [2]     CUBEMAP_ENABLE = 0
+//   [3]     BORDER_SOURCE = 1 (COLOR)
+//   [7:4]   DIMENSIONALITY = 2 (2D)
+//   [15:8]  COLOR = SZ_A8R8G8B8 (0x06)
+//   [19:16] MIPMAP_LEVELS = 1
+//   [23:20] BASE_SIZE_U = log2(width)
+//   [27:24] BASE_SIZE_V = log2(height)
+//   [31:28] BASE_SIZE_P = 0
+// Compare LU_IMAGE: 0x0001122a = DMA2 | BORDER_COLOR | DIM_2D | COLOR_0x12 | MIP1
+static uint32_t xbox_tex_format_argb8_swizzled(int w, int h)
+{
+	int log2w = 0, log2h = 0;
+	{ int v = w; while (v > 1) { v >>= 1; log2w++; } }
+	{ int v = h; while (v > 1) { v >>= 1; log2h++; } }
+	// Base = 0x0001062a: same as LU (0x0001122a) but COLOR=0x06 instead of 0x12
+	return 0x0001062a
+	     | (log2w << 20)    // BASE_SIZE_U
+	     | (log2h << 24);   // BASE_SIZE_V
 }
 
 // Helper: build NV2A texture wrap value from GL wrap modes
@@ -1317,6 +1448,102 @@ static uint32_t xbox_tex_filter(int min_filter, int mag_filter)
 	    min_filter == GL_LINEAR_MIPMAP_LINEAR) nv_min = 2;
 	if (mag_filter == GL_LINEAR) nv_mag = 2;
 	return (nv_mag << 24) | (nv_min << 16) | 0x2000;
+}
+
+// ---- CPU-side frustum clipping ----
+// NV2A in PROGRAM mode has NO hardware frustum clipping. The rasterizer also
+// has a limited guard band (~2048 pixels from viewport center). Vertices outside
+// the guard band cause stretched triangles across the entire screen. We clip
+// against 5 frustum planes on CPU before submitting geometry to the GPU:
+//   0: near   (w >= NEAR_CLIP_W)
+//   1: left   (x >= -GUARD_BAND * w)
+//   2: right  (x <=  GUARD_BAND * w)
+//   3: bottom (y >= -GUARD_BAND * w)
+//   4: top    (y <=  GUARD_BAND * w)
+
+#define NEAR_CLIP_W    1.0f   // minimum clip-space w (near plane)
+#define GUARD_BAND_NDC 1.0f   // clip at NDC ±1 = viewport edges (matches real GL frustum)
+
+struct clip_vert {
+	float x, y, z, u, v;   // object-space position + texture coords
+	float cx, cy, cw;       // clip-space coordinates (from mvp_clip)
+};
+
+#define MAX_CLIP_POLY 8  // max vertices per polygon after 5-plane clipping
+
+// Signed distance to clip plane (positive = inside)
+static inline float clip_plane_dist(const struct clip_vert *cv, int plane)
+{
+	switch (plane) {
+		case 0: return cv->cw - NEAR_CLIP_W;
+		case 1: return cv->cx + GUARD_BAND_NDC * cv->cw;
+		case 2: return GUARD_BAND_NDC * cv->cw - cv->cx;
+		case 3: return cv->cy + GUARD_BAND_NDC * cv->cw;
+		case 4: return GUARD_BAND_NDC * cv->cw - cv->cy;
+		default: return 1.0f;
+	}
+}
+
+// Interpolate between two clip vertices
+static inline void clip_vert_lerp(struct clip_vert *out,
+	const struct clip_vert *a, const struct clip_vert *b, float t)
+{
+	out->x  = a->x  + t * (b->x  - a->x);
+	out->y  = a->y  + t * (b->y  - a->y);
+	out->z  = a->z  + t * (b->z  - a->z);
+	out->u  = a->u  + t * (b->u  - a->u);
+	out->v  = a->v  + t * (b->v  - a->v);
+	out->cx = a->cx + t * (b->cx - a->cx);
+	out->cy = a->cy + t * (b->cy - a->cy);
+	out->cw = a->cw + t * (b->cw - a->cw);
+}
+
+// Sutherland-Hodgman: clip convex polygon against one plane.
+static int clip_poly_plane(const struct clip_vert *in, int n_in,
+                           struct clip_vert *out, int plane)
+{
+	if (n_in < 3) return 0;
+	int n_out = 0;
+	for (int i = 0; i < n_in; i++) {
+		int j = (i + 1 < n_in) ? i + 1 : 0;
+		float di = clip_plane_dist(&in[i], plane);
+		float dj = clip_plane_dist(&in[j], plane);
+		if (di >= 0)
+			out[n_out++] = in[i];
+		if ((di >= 0) != (dj >= 0)) {
+			float t = di / (di - dj);
+			clip_vert_lerp(&out[n_out], &in[i], &in[j], t);
+			n_out++;
+		}
+	}
+	return n_out;
+}
+
+// Clip a triangle against all 5 frustum planes, output triangulated result.
+// Returns number of output vertices (multiple of 3, or 0).
+static int clip_triangle_frustum(const struct clip_vert tri[3], float *out)
+{
+	struct clip_vert pa[MAX_CLIP_POLY], pb[MAX_CLIP_POLY];
+	int n;
+
+	memcpy(pa, tri, 3 * sizeof(struct clip_vert));
+	n = 3;
+
+	n = clip_poly_plane(pa, n, pb, 0); if (n < 3) return 0; // near
+	n = clip_poly_plane(pb, n, pa, 1); if (n < 3) return 0; // left
+	n = clip_poly_plane(pa, n, pb, 2); if (n < 3) return 0; // right
+	n = clip_poly_plane(pb, n, pa, 3); if (n < 3) return 0; // bottom
+	n = clip_poly_plane(pa, n, pb, 4); if (n < 3) return 0; // top
+
+	// Triangulate output polygon (fan from vertex 0)
+	int nout = 0;
+	for (int i = 1; i < n - 1; i++) {
+		float *o;
+		o = out + nout*5; o[0]=pb[0].x; o[1]=pb[0].y; o[2]=pb[0].z; o[3]=pb[0].u; o[4]=pb[0].v; nout++;
+		o = out + nout*5; o[0]=pb[i].x; o[1]=pb[i].y; o[2]=pb[i].z; o[3]=pb[i].u; o[4]=pb[i].v; nout++;
+		o = out + nout*5; o[0]=pb[i+1].x; o[1]=pb[i+1].y; o[2]=pb[i+1].z; o[3]=pb[i+1].u; o[4]=pb[i+1].v; nout++;
+	}
+	return nout;
 }
 
 static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
@@ -1384,17 +1611,56 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		}
 	}
 
-	// Fix degenerate 2D projection: when mvp[15]==0, the projection maps w=z.
-	// With z=0 vertices, the shader's pos.xyz/=pos.w divides by zero → NaN,
-	// which crashes the NV2A. Fix: set mvp[15]=1 so w=1 after transform.
-	if (mvp[15] == 0.0f) {
-		mvp[15] = 1.0f;
+	// Note: mvp[15]==0 is normal for gdrawroomsprojmat and grotatespriteprojmat.
+	// The shader's w-clamp (max(pos.w, 0.001)) prevents divide-by-zero for
+	// degenerate vertices. Do NOT add 1 to mvp[15] — that would shift ALL
+	// vertex w values by 1, breaking grotatespriteprojmat (2D sprites rendered
+	// at half size in top-left corner) and slightly perturbing 3D perspective.
+
+	// ---- CPU-side frustum clipping ----
+	// NV2A PROGRAM mode has no hardware frustum clipping, and the rasterizer's
+	// guard band is limited (~2048px). Vertices outside the guard band cause
+	// stretched triangles. We check 5 planes: near + left/right/top/bottom.
+	//
+	// Only apply for 3D perspective draws where w depends strongly on vertex pos.
+	// Check squared magnitude of the w-column (elements [3],[7],[11]) of mvp_clip.
+	int need_clip = 0;
+	float w_col_sq = mvp_clip[3]*mvp_clip[3] + mvp_clip[7]*mvp_clip[7] + mvp_clip[11]*mvp_clip[11];
+	int is_3d_perspective = (w_col_sq > 100.0f);
+	if (is_3d_perspective) {
+		const GLushort *idx = (const GLushort *)((char *)ibo->cpu_data + (intptr_t)indices_offset);
+		int pos_off = attrib_state[XATTR_VERTEX].offset;
+		int pos_stride = attrib_state[XATTR_VERTEX].stride;
+		int all_out[5] = {1, 1, 1, 1, 1}; // per-plane: all vertices outside?
+		int any_out = 0;
+		for (int i = 0; i < count; i++) {
+			int vi = idx[i];
+			const float *v = (const float *)((char *)vbo->gpu_addr + pos_off + vi * pos_stride);
+			float cw = v[0]*mvp_clip[3] + v[1]*mvp_clip[7] + v[2]*mvp_clip[11] + mvp_clip[15];
+			float cx = v[0]*mvp_clip[0] + v[1]*mvp_clip[4] + v[2]*mvp_clip[8] + mvp_clip[12];
+			float cy = v[0]*mvp_clip[1] + v[1]*mvp_clip[5] + v[2]*mvp_clip[9] + mvp_clip[13];
+			float d[5];
+			d[0] = cw - NEAR_CLIP_W;
+			d[1] = cx + GUARD_BAND_NDC * cw;
+			d[2] = GUARD_BAND_NDC * cw - cx;
+			d[3] = cy + GUARD_BAND_NDC * cw;
+			d[4] = GUARD_BAND_NDC * cw - cy;
+			for (int p = 0; p < 5; p++) {
+				if (d[p] >= 0) all_out[p] = 0;
+				else any_out = 1;
+			}
+		}
+		// All vertices outside any single plane → fully invisible
+		for (int p = 0; p < 5; p++) {
+			if (all_out[p]) { frame_skip_count++; return; }
+		}
+		if (any_out) { need_clip = 1; frame_clip_count++; }
 	}
 
 	frame_draw_count++;
 
-	// Log draws: first 5 per frame, for first 5 frames
-	if (global_frame_num < 5 && frame_draw_count <= 5) {
+	// Log draws: first 5 per frame, for first 10 frames
+	if (global_frame_num < 10 && frame_draw_count <= 5) {
 		const GLushort *log_idx = (const GLushort *)((char *)ibo->cpu_data + (intptr_t)indices_offset);
 		int n = count < 4 ? count : 4;
 		xbox_log("Xbox: F%d D%d mode=%x cnt=%d tex=%d vbo=%p\n",
@@ -1409,14 +1675,41 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			GLuint tid = gl_state.bound_texture[0];
 			if (tid > 0 && tid < MAX_TEXTURES && texture_table[tid].allocated) {
 				struct xbox_texture *t = &texture_table[tid];
-				xbox_log("  tex: %dx%d pitch=%d phys=%x\n",
+				xbox_log("  tex: %dx%d pitch=%d %s phys=%x\n",
 					t->width, t->height, t->pitch,
+					t->swizzled ? "SZ+REPEAT" : "LU+CLAMP",
 					(unsigned)((uintptr_t)t->addr & 0x03ffffff));
 			}
 		}
 		xbox_log("  idx=");
 		for (int j = 0; j < n; j++) xbox_log("%d ", (int)log_idx[j]);
 		xbox_log("\n");
+		// Log UV values — read from IBO's cpu_data side to avoid WC memory issues
+		if (attrib_state[XATTR_TEXCOORD].enabled) {
+			int tc_off = attrib_state[XATTR_TEXCOORD].offset;
+			int tc_stride = attrib_state[XATTR_TEXCOORD].stride;
+			xbox_log("  tc: off=%d stride=%d size=%d\n",
+				tc_off, tc_stride, attrib_state[XATTR_TEXCOORD].size);
+			// Read raw hex from VBO GPU memory to check data
+			for (int j = 0; j < n && j < 4; j++) {
+				int vi = log_idx[j];
+				uint32_t *raw = (uint32_t *)((char *)vbo->gpu_addr + tc_off + vi * tc_stride);
+				xbox_log("  uv[%d] hex=%08x %08x\n", vi, raw[0], raw[1]);
+			}
+		}
+		// Log vertex positions (xyz) for first 2 verts
+		{
+			int pos_off = attrib_state[XATTR_VERTEX].offset;
+			int pos_stride = attrib_state[XATTR_VERTEX].stride;
+			for (int j = 0; j < n && j < 2; j++) {
+				int vi = log_idx[j];
+				const float *vp = (const float *)((char *)vbo->gpu_addr + pos_off + vi * pos_stride);
+				xbox_log("  v[%d] pos=(%d,%d,%d)/1000\n", vi,
+					(int)(vp[0]*1000), (int)(vp[1]*1000), (int)(vp[2]*1000));
+			}
+		}
+		xbox_log("  is3d=%d needclip=%d mvp15=%d/1000\n",
+			is_3d_perspective, need_clip, (int)(mvp[15]*1000));
 		xbox_log("  mvp diag=%d,%d,%d,%d/1000\n",
 			(int)(mvp[0]*1000), (int)(mvp[5]*1000),
 			(int)(mvp[10]*1000), (int)(mvp[15]*1000));
@@ -1443,6 +1736,14 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		// Colour: 1 constant register (c[4])
 		pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 4);
 		memcpy(p, gl_uniforms.colour, 4 * 4); p += 4;
+		// Shader constant c[5] = {epsilon, 1, 0, 0}
+		// .x = near-plane w-clamp epsilon (prevents behind-camera vertex inversion)
+		// .y = 1.0 for TEX0.w (q=1 for 2D_PROJECTIVE texture lookup)
+		{
+			static const float c5[4] = { 0.001f, 1.0f, 0.0f, 0.0f };
+			pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 4);
+			memcpy(p, c5, 4 * 4); p += 4;
+		}
 		pb_end(p);
 	}
 
@@ -1460,25 +1761,33 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		uint32_t *p = pb_begin();
 
 		// -- Texture stage 0 --
-		// DIAGNOSTIC: Force null texture for ALL draws to isolate texture issues
-		if (0 && tex && tex->addr) {
-			// Check if dimensions are power-of-two (REPEAT only works for POT on NV2A)
-			int is_pot = (tex->width & (tex->width - 1)) == 0
-			          && (tex->height & (tex->height - 1)) == 0
-			          && tex->width > 0 && tex->height > 0;
-			uint32_t wrap_val = is_pot
-				? xbox_tex_wrap(tex->wrap_s, tex->wrap_t)
-				: 0x00030303; // Force CLAMP_TO_EDGE for NPOT
+		if (tex && tex->addr) {
 			uint32_t filter_val = xbox_tex_filter(tex->min_filter, tex->mag_filter);
 
-			p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
-				(DWORD)(uintptr_t)tex->addr & 0x03ffffff,
-				xbox_tex_format_argb8());
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0),
-				tex->pitch << 16);
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
-				(tex->width << 16) | tex->height);
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), wrap_val);
+			if (tex->swizzled) {
+				// POT swizzled texture: SZ format + REPEAT wrapping
+				uint32_t wrap_val = xbox_tex_wrap(tex->wrap_s, tex->wrap_t);
+				p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
+					(DWORD)(uintptr_t)tex->addr & 0x03ffffff,
+					xbox_tex_format_argb8_swizzled(tex->width, tex->height));
+				// Swizzled textures don't use NPOT registers, but we still
+				// set them to safe values (NV2A ignores them for SZ format)
+				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0),
+					tex->pitch << 16);
+				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
+					(tex->width << 16) | tex->height);
+				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), wrap_val);
+			} else {
+				// NPOT linear texture: LU_IMAGE format + CLAMP (REPEAT not supported)
+				p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
+					(DWORD)(uintptr_t)tex->addr & 0x03ffffff,
+					xbox_tex_format_argb8());
+				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0),
+					tex->pitch << 16);
+				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
+					(tex->width << 16) | tex->height);
+				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), 0x00030303);
+			}
 			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_ENABLE(0), 0x4003ffc0);
 			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_FILTER(0), filter_val);
 		} else if (null_texture_addr) {
@@ -1511,12 +1820,11 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			p = pb_push1(p, NV097_SET_BLEND_FUNC_SFACTOR, (uint32_t)gl_state.blend_sfactor);
 			p = pb_push1(p, NV097_SET_BLEND_FUNC_DFACTOR, (uint32_t)gl_state.blend_dfactor);
 		}
-		// DIAGNOSTIC: Force depth test OFF to isolate crash trigger
-		p = pb_push1(p, NV097_SET_DEPTH_TEST_ENABLE, 0 /*gl_state.depth_test_enabled*/);
-		if (0 /*gl_state.depth_test_enabled*/) {
+		p = pb_push1(p, NV097_SET_DEPTH_TEST_ENABLE, gl_state.depth_test_enabled);
+		if (gl_state.depth_test_enabled) {
 			p = pb_push1(p, NV097_SET_DEPTH_FUNC, (uint32_t)gl_state.depth_func);
 		}
-		p = pb_push1(p, NV097_SET_DEPTH_MASK, 0 /*gl_state.depth_mask ? 1 : 0*/);
+		p = pb_push1(p, NV097_SET_DEPTH_MASK, gl_state.depth_mask ? 1 : 0);
 		p = pb_push1(p, NV097_SET_CULL_FACE_ENABLE, gl_state.cull_enabled);
 		if (gl_state.cull_enabled) {
 			uint32_t nv_front = (gl_state.front_face == GL_CW)
@@ -1545,50 +1853,127 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		}
 	}
 
-	// ---- 3. Submit indices in batches ----
-	// Uses INDEX_DATA (0x1800) with packed 16-bit index pairs, matching the
-	// proven nxdk mesh sample approach. Each 32-bit word contains two 16-bit
-	// indices: (index[2k+1] << 16) | index[2k].
+	// ---- 3. Submit geometry ----
 	{
-		#define MAX_BATCH 240
 		const GLushort *src_indices = (const GLushort *)((char *)ibo->cpu_data + (intptr_t)indices_offset);
 
-		// Determine NV2A primitive type
-		uint32_t nv_prim;
-		switch (mode) {
-			case GL_TRIANGLE_FAN:   nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLE_FAN; break;
-			case GL_TRIANGLE_STRIP: nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLE_STRIP; break;
-			case GL_TRIANGLES:      nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLES; break;
-			default:                nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLES; break;
-		}
+		if (need_clip) {
+			// Frustum clipping path: clip each triangle against all 5 planes,
+			// write clipped vertices to VBO pool, draw as GL_TRIANGLES.
+			int pos_off = attrib_state[XATTR_VERTEX].offset;
+			int pos_stride = attrib_state[XATTR_VERTEX].stride;
+			int tc_off = attrib_state[XATTR_TEXCOORD].enabled ? attrib_state[XATTR_TEXCOORD].offset : 0;
+			int tc_stride = attrib_state[XATTR_TEXCOORD].enabled ? attrib_state[XATTR_TEXCOORD].stride : pos_stride;
 
-		for (int i = 0; i < count; ) {
-			int batch = count - i;
-			if (batch > MAX_BATCH) batch = MAX_BATCH;
-			int packed_count = (batch + 1) / 2; // ceil(batch/2) packed 32-bit words
+			// Max output: each triangle can produce up to 18 verts (6 triangles)
+			float clipped[512 * 5];
+			int clipped_count = 0;
+			int max_verts = 512;
 
-			uint32_t *p = pb_begin();
-			p = pb_push1(p, NV097_SET_BEGIN_END, nv_prim);
+			// Decompose fan/strip into individual triangles, clip each
+			for (int t = 0; t < count - 2 && clipped_count + 18 <= max_verts; t++) {
+				int i0, i1, i2;
+				if (mode == GL_TRIANGLE_FAN) {
+					i0 = 0; i1 = t + 1; i2 = t + 2;
+				} else if (mode == GL_TRIANGLE_STRIP) {
+					if (t & 1) { i0 = t + 1; i1 = t; i2 = t + 2; }
+					else { i0 = t; i1 = t + 1; i2 = t + 2; }
+				} else { // GL_TRIANGLES
+					i0 = t * 3; i1 = t * 3 + 1; i2 = t * 3 + 2;
+				}
 
-			// NV097_ARRAY_ELEMENT16 / INDEX_DATA: packed 16-bit index pairs
-			pb_push(p++, 0x40000000 | NV097_ARRAY_ELEMENT16, packed_count);
-			for (int j = 0; j < batch - 1; j += 2) {
-				*p++ = ((uint32_t)src_indices[i + j + 1] << 16)
-				     | (uint32_t)src_indices[i + j];
+				struct clip_vert tri[3];
+				int vidx[3] = { src_indices[i0], src_indices[i1], src_indices[i2] };
+				for (int k = 0; k < 3; k++) {
+					const float *pos = (const float *)((char *)vbo->gpu_addr + pos_off + vidx[k] * pos_stride);
+					tri[k].x = pos[0]; tri[k].y = pos[1]; tri[k].z = pos[2];
+					if (attrib_state[XATTR_TEXCOORD].enabled) {
+						const float *uv = (const float *)((char *)vbo->gpu_addr + tc_off + vidx[k] * tc_stride);
+						tri[k].u = uv[0]; tri[k].v = uv[1];
+					} else {
+						tri[k].u = 0.0f; tri[k].v = 0.0f;
+					}
+					tri[k].cx = pos[0]*mvp_clip[0] + pos[1]*mvp_clip[4] + pos[2]*mvp_clip[8] + mvp_clip[12];
+					tri[k].cy = pos[0]*mvp_clip[1] + pos[1]*mvp_clip[5] + pos[2]*mvp_clip[9] + mvp_clip[13];
+					tri[k].cw = pos[0]*mvp_clip[3] + pos[1]*mvp_clip[7] + pos[2]*mvp_clip[11] + mvp_clip[15];
+				}
+
+				int n = clip_triangle_frustum(tri, clipped + clipped_count * 5);
+				clipped_count += n;
 			}
-			if (batch & 1) {
-				// Odd count: last word has one real index, duplicate it to
-				// create a degenerate triangle that renders nothing visible
-				uint32_t last_idx = (uint32_t)src_indices[i + batch - 1];
-				*p++ = (last_idx << 16) | last_idx;
+
+			if (clipped_count < 3) { return; }
+
+			// Allocate clipped vertices in VBO streaming pool
+			int vert_bytes = clipped_count * 20; // 5 floats * 4 bytes
+			int aligned_off = (vbo_pool_offset + 15) & ~15;
+			if (aligned_off + vert_bytes > VBO_POOL_SIZE) { return; }
+			void *clip_vbo = (char *)vbo_pool + aligned_off;
+			memcpy(clip_vbo, clipped, vert_bytes);
+			__asm__ volatile("sfence" ::: "memory");
+			vbo_pool_offset = aligned_off + vert_bytes;
+
+			// Re-point attribs to clipped vertex data (stride=20, pos@0, uv@12)
+			xbox_set_attrib_pointer(XATTR_VERTEX, 3, 20, clip_vbo);
+			if (attrib_state[XATTR_TEXCOORD].enabled) {
+				xbox_set_attrib_pointer(XATTR_TEXCOORD, 2, 20, (char *)clip_vbo + 12);
 			}
 
-			p = pb_push1(p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END);
-			pb_end(p);
+			// Draw clipped triangles with sequential indices
+			#define MAX_BATCH 240
+			for (int i = 0; i < clipped_count; ) {
+				int batch = clipped_count - i;
+				if (batch > MAX_BATCH) batch = MAX_BATCH;
+				int packed_count = (batch + 1) / 2;
 
-			i += batch;
+				uint32_t *p = pb_begin();
+				p = pb_push1(p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_TRIANGLES);
+				pb_push(p++, 0x40000000 | NV097_ARRAY_ELEMENT16, packed_count);
+				for (int j = 0; j < batch - 1; j += 2) {
+					*p++ = (uint32_t)((i + j + 1) << 16) | (uint32_t)(i + j);
+				}
+				if (batch & 1) {
+					uint32_t last = (uint32_t)(i + batch - 1);
+					*p++ = (last << 16) | last;
+				}
+				p = pb_push1(p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END);
+				pb_end(p);
+				i += batch;
+			}
+			#undef MAX_BATCH
+		} else {
+			// Normal path: all vertices in front of near plane, draw as-is
+			#define MAX_BATCH 240
+			uint32_t nv_prim;
+			switch (mode) {
+				case GL_TRIANGLE_FAN:   nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLE_FAN; break;
+				case GL_TRIANGLE_STRIP: nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLE_STRIP; break;
+				case GL_TRIANGLES:      nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLES; break;
+				default:                nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLES; break;
+			}
+
+			for (int i = 0; i < count; ) {
+				int batch = count - i;
+				if (batch > MAX_BATCH) batch = MAX_BATCH;
+				int packed_count = (batch + 1) / 2;
+
+				uint32_t *p = pb_begin();
+				p = pb_push1(p, NV097_SET_BEGIN_END, nv_prim);
+				pb_push(p++, 0x40000000 | NV097_ARRAY_ELEMENT16, packed_count);
+				for (int j = 0; j < batch - 1; j += 2) {
+					*p++ = ((uint32_t)src_indices[i + j + 1] << 16)
+					     | (uint32_t)src_indices[i + j];
+				}
+				if (batch & 1) {
+					uint32_t last_idx = (uint32_t)src_indices[i + batch - 1];
+					*p++ = (last_idx << 16) | last_idx;
+				}
+				p = pb_push1(p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END);
+				pb_end(p);
+				i += batch;
+			}
+			#undef MAX_BATCH
 		}
-		#undef MAX_BATCH
 	}
 }
 
