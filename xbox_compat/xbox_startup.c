@@ -67,13 +67,11 @@ static void xbox_hw_preinit(void)
      * Passing NULL callback leaves audio paused. */
     XAudioInit(16, 2, NULL, NULL);
 
-    /* --- Video mode --- */
-    VIDEO_MODE vm = XVideoGetMode();
-    if (vm.width > 0 && vm.height > 0) {
-        XVideoSetMode(vm.width, vm.height, 32, REFRESH_DEFAULT);
-    } else {
-        XVideoSetMode(640, 480, 32, REFRESH_60HZ);
-    }
+    /* --- Video mode ---
+     * Set a safe 640x480 default.  The real display resolution is applied
+     * later from duke3d.cfg (DisplayWidth/DisplayHeight) after config is
+     * read in game.c. */
+    XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
 
     /* Register cleanup handler (runs before exit()'s HalReturnToFirmware). */
     atexit(xbox_cleanup);
@@ -88,8 +86,5 @@ static void xbox_hw_preinit(void)
         xbox_log_fd = _open(log_paths[i], _O_WRONLY | _O_CREAT | _O_TRUNC, 0);
 
     xbox_log("=== jfduke3d Xbox log ===\n");
-    xbox_log("Video: %dx%d 32bpp  log_fd=%d\n",
-        vm.width  > 0 ? vm.width  : 640,
-        vm.height > 0 ? vm.height : 480,
-        xbox_log_fd);
+    xbox_log("Video: 640x480 32bpp (safe default)  log_fd=%d\n", xbox_log_fd);
 }

@@ -34,6 +34,8 @@
 #include <pbkit/pbkit.h>
 extern int xbox_pbkit_initialized;
 extern void xbox_pbkit_init_for_polymost(void);
+extern void xbox_pbkit_shutdown_for_software(void);
+extern void xbox_polymost_frame_start(void);
 #endif
 #if defined(__APPLE__)
 # include "osxbits.h"
@@ -815,9 +817,9 @@ void getvalidmodes(void)
 	if (validmodecnt) return;
 
 #ifdef _XBOX
-	/* Xbox: display resolution is fixed at boot (XVideoGetMode).
-	 * These are *render* resolutions — the Build engine framebuffer size.
-	 * SDL_RenderCopy upscales the texture to the display window. */
+	/* Xbox: 8-bit render resolutions can be any size <= display (upscaled
+	 * by SDL_RenderCopy).  32-bit (polymost) always renders at the current
+	 * physical display resolution to avoid GPU scaling issues. */
 	{
 		VIDEO_MODE vm = XVideoGetMode();
 		int maxw = vm.width > 0 ? vm.width : 640;
@@ -830,15 +832,14 @@ void getvalidmodes(void)
 		for (i = 0; xbox_res[i][0]; i++) {
 			if (xbox_res[i][0] <= maxw && xbox_res[i][1] <= maxh) {
 				addvalidmode(xbox_res[i][0], xbox_res[i][1], 8, 1, 0, 60, -1);
-#if USE_POLYMOST && USE_OPENGL
-				// Xbox GL shim is always available; glunavailable hasn't been
-				// set yet (getvalidmodes runs before initsystem), so add
-				// 32-bit modes unconditionally.
-				addvalidmode(xbox_res[i][0], xbox_res[i][1], 32, 1, 0, 60, -1);
-#endif
-				xbox_log("Xbox getvalidmodes: added %dx%d\n", xbox_res[i][0], xbox_res[i][1]);
+				xbox_log("Xbox getvalidmodes: added 8bpp %dx%d\n", xbox_res[i][0], xbox_res[i][1]);
 			}
 		}
+#if USE_POLYMOST && USE_OPENGL
+		/* Single 32bpp mode at the physical display resolution */
+		addvalidmode(maxw, maxh, 32, 1, 0, 60, -1);
+		xbox_log("Xbox getvalidmodes: added 32bpp %dx%d (physical)\n", maxw, maxh);
+#endif
 		sortvalidmodes();
 	}
 #else
@@ -962,8 +963,14 @@ int setvideomode(int xdim, int ydim, int bitspp, int fullsc)
 
 		if (bitspp > 8) {
 			/* Switching to polymost (32-bit): init GL shim + pbkit.
-			 * SDL renderer stays alive but pbkit takes over the framebuffer. */
+			 * Release SDL texture/framebuffer first — pbkit takes over display. */
 #if USE_OPENGL
+			/* Release SDL rendering resources before pbkit takes over the GPU.
+			 * The SDL window and renderer stay alive for later re-creation
+			 * if switching back to software mode. */
+			if (sdl_texture) { SDL_DestroyTexture(sdl_texture); sdl_texture = NULL; }
+			if (frame) { free(frame); frame = NULL; }
+
 			if (glbuild_init()) {
 				buildputs("Xbox: glbuild_init failed for polymost\n");
 				return -1;
@@ -993,6 +1000,10 @@ int setvideomode(int xdim, int ydim, int bitspp, int fullsc)
 		/* 8-bit: just recreate texture + framebuffer at new size. */
 		{
 			int i, j, pitch;
+
+			/* If coming from polymost, shut down pbkit and restore PCRTC
+			 * so SDL rendering becomes visible again. */
+			xbox_pbkit_shutdown_for_software();
 
 			/* Free old texture and framebuffer */
 			if (sdl_texture) { SDL_DestroyTexture(sdl_texture); sdl_texture = NULL; }
@@ -1373,17 +1384,33 @@ void showframe(void)
 				static int sf_poly_count = 0;
 				if (sf_poly_count < 5) xbox_log("Xbox: showframe POLYMOST #%d enter\n", sf_poly_count);
 				// Wait for GPU to finish all draw commands
-				while (pb_busy()) { /* spin */ }
+				{
+					DWORD t0 = KeTickCount;
+					while (pb_busy()) {
+						if (KeTickCount - t0 > 500) {
+							xbox_log("Xbox: showframe pb_busy TIMEOUT frame=%d\n", sf_poly_count);
+							break;
+						}
+					}
+				}
 				if (sf_poly_count < 5) xbox_log("Xbox: showframe pb_busy done\n");
-				// Signal frame-end to pbkit (triggers buffer swap at vblank).
-				// Do NOT call pb_reset/pb_target_back_buffer here — those are
-				// frame-start operations that must happen in glClear, right
-				// before the next frame's draws. This matches the mesh sample
-				// pattern where pb_wait_for_vbl/pb_reset/pb_target_back_buffer
-				// are at the TOP of the frame loop, and pb_finished is at the
-				// BOTTOM.
-				while (pb_finished()) { /* wait for flip */ }
+				// Signal frame-end (triggers buffer swap at vblank).
+				{
+					DWORD t0 = KeTickCount;
+					while (pb_finished()) {
+						if (KeTickCount - t0 > 500) {
+							xbox_log("Xbox: showframe pb_finished TIMEOUT frame=%d\n", sf_poly_count);
+							break;
+						}
+					}
+				}
 				if (sf_poly_count < 5) { xbox_log("Xbox: showframe pb_finished done\n"); sf_poly_count++; }
+
+				// Prepare the next frame immediately after flip.
+				// This ensures pb_reset + GPU state setup happens every
+				// frame, even when the game doesn't call glClear (e.g.
+				// main menu 2D-only rendering).
+				xbox_polymost_frame_start();
 			}
 			return;
 		}

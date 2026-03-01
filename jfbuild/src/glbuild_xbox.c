@@ -121,7 +121,10 @@ static struct xbox_texture {
 	int swizzled;      // 1 = SZ (Morton-swizzled) format, supports REPEAT wrap
 	int wrap_s, wrap_t;
 	int min_filter, mag_filter;
+	int last_used_frame; // frame number when last bound (for LRU eviction)
+	int alloc_size;      // size in bytes of the contiguous allocation
 } texture_table[MAX_TEXTURES];
+static int total_texture_bytes = 0;  // total contiguous memory allocated for textures
 
 // ---- NV2A texture swizzling (Morton code) ----
 // NV2A's swizzled (SZ_) texture format interleaves x and y coordinate bits
@@ -407,7 +410,7 @@ static void xbox_test_draw(void)
 			memcpy(p, viewport_mvp, 64); p += 16;               // c[0]-c[3]: MVP
 			memcpy(p, green, 16); p += 4;                        // c[4]: colour
 			{                                                     // c[5]: wclamp
-				static const float c5[4] = { 0.001f, 1.0f, 0.0f, 0.0f };
+				static const float c5[4] = { 0.0001f, 1.0f, 0.0f, 0.0f };
 				memcpy(p, c5, 16); p += 4;
 			}
 			{                                                     // c[6]: texscale
@@ -465,27 +468,25 @@ static void APIENTRY xbox_glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat 
 	gl_state.clear_a = a;
 }
 
-static void APIENTRY xbox_glClear(GLbitfield mask)
+static int clear_frame_number = 0;  // frame counter (reset on pbkit shutdown)
+static int frame_setup_done = 0;    // 1 = frame-start setup has been done for current frame
+
+// Frame-start setup: pb_reset, render target, VBO pool reset, GPU state.
+// Called at the start of every frame — either from glClear (if the game
+// calls it) or from xbox_polymost_frame_start (called by showframe after
+// the previous frame's pb_finished, ensuring the next frame is ready).
+// The frame_setup_done flag prevents double-setup when glClear IS called.
+static void xbox_do_frame_start(void)
 {
-	if (!xbox_pbkit_initialized) return;
+	int frame_number = clear_frame_number;
 
-	static int frame_number = 0;
-	if (frame_number < 5) {
-		xbox_log("Xbox: glClear ENTER frame=%d mask=%x\n", frame_number, mask);
-	}
+	pb_wait_for_vbl();
+	pb_reset();
+	pb_target_back_buffer();
+	if (frame_number == 0)
+		xbox_log("Xbox: first frame reset done\n");
 
-	// Frame-start sequence (matching mesh sample pattern):
-	// pb_wait_for_vbl + pb_reset + pb_target_back_buffer at frame START.
-	// showframe() signals frame-end with pb_finished(); we do the reset here.
-	{
-		pb_wait_for_vbl();
-		pb_reset();
-		pb_target_back_buffer();
-		if (frame_number == 0)
-			xbox_log("Xbox: first frame reset done\n");
-	}
-
-	// Per-frame draw stats (log first 60 frames to capture movement)
+	// Per-frame draw stats (log first 60 frames)
 	if (frame_number > 0 && frame_number <= 60) {
 		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d 2d=%d depthoff=%d vp=(%d,%d,%d,%d)\n",
 			frame_number - 1, frame_draw_count, frame_skip_count, frame_clip_count,
@@ -498,38 +499,9 @@ static void APIENTRY xbox_glClear(GLbitfield mask)
 	frame_2d_count = 0;
 	frame_depthoff_count = 0;
 	global_frame_num = frame_number;
-	frame_number++;
-
-	if (frame_number <= 3) {
-		xbox_log("Xbox: glClear(%x) scr=%dx%d col=%d,%d,%d/255 vp_set=%d\n",
-			mask, screen_width, screen_height,
-			(int)(gl_state.clear_r * 255), (int)(gl_state.clear_g * 255),
-			(int)(gl_state.clear_b * 255), viewport_set_count);
-	}
-
-	// ALWAYS clear depth+stencil, then color — matching mesh sample pattern.
-	// The mesh sample clears depth EVERY frame regardless. This ensures the
-	// GPU surface state stays consistent. Use the newer pb_set_depth_stencil_buffer_region
-	// which uses explicit register writes instead of the shared PARAMETER_A/B registers.
-	pb_set_depth_stencil_buffer_region(
-		NV097_SET_SURFACE_FORMAT_ZETA_Z24S8,
-		0xFFFFFF, 0x00, // depth=max, stencil=0
-		0, 0, screen_width, screen_height);
-
-	if (mask & GL_COLOR_BUFFER_BIT) {
-		unsigned char cr = (unsigned char)(gl_state.clear_r * 255.0f);
-		unsigned char cg = (unsigned char)(gl_state.clear_g * 255.0f);
-		unsigned char cb = (unsigned char)(gl_state.clear_b * 255.0f);
-		unsigned char ca = (unsigned char)(gl_state.clear_a * 255.0f);
-		DWORD color = (ca << 24) | (cr << 16) | (cg << 8) | cb;
-		pb_fill(0, 0, screen_width, screen_height, color);
-	}
-
-	// Wait for clears to complete before 3D setup (matches mesh sample pattern)
-	while (pb_busy()) { /* spin */ }
+	clear_frame_number = ++frame_number;
 
 	// Reset VBO streaming pool for the new frame.
-	// Safe: pb_finished() + pb_reset() + pb_busy() above guarantee full GPU idle.
 	vbo_pool_offset = 0;
 	draw_since_sync = 0;
 
@@ -555,9 +527,7 @@ static void APIENTRY xbox_glClear(GLbitfield mask)
 		p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_FILTER(2), 0x02022000);
 		p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_FILTER(3), 0x02022000);
 
-		// Re-set critical pipeline state to known-good values after clears.
-		// pb_init sets these once, but per-draw state changes and the
-		// hardware clear operation may leave residual state issues.
+		// Re-set critical pipeline state to known-good values.
 		p = pb_push1(p, NV097_SET_DEPTH_FUNC, NV097_SET_DEPTH_FUNC_V_LEQUAL);
 		p = pb_push1(p, NV097_SET_DEPTH_MASK, 1);
 		p = pb_push1(p, NV097_SET_DEPTH_TEST_ENABLE, 0);
@@ -574,6 +544,63 @@ static void APIENTRY xbox_glClear(GLbitfield mask)
 
 		// Register combiners (fragment processing)
 		xbox_setup_combiners();
+	}
+
+	frame_setup_done = 1;
+}
+
+// Called by showframe (sdlayer2.c) after pb_finished to prepare the next
+// frame.  This ensures every frame gets pb_reset + GPU state setup even
+// when the game doesn't call glClear between frames (e.g. main menu).
+void xbox_polymost_frame_start(void)
+{
+	if (!xbox_pbkit_initialized) return;
+	xbox_do_frame_start();
+}
+
+static void APIENTRY xbox_glClear(GLbitfield mask)
+{
+	if (!xbox_pbkit_initialized) return;
+
+	// Ensure frame-start setup has been done (pb_reset, render target, GPU state).
+	// If showframe already called xbox_polymost_frame_start, this is a no-op.
+	if (!frame_setup_done) {
+		xbox_do_frame_start();
+	}
+
+	int frame_number = clear_frame_number;
+	if (frame_number <= 3) {
+		xbox_log("Xbox: glClear(%x) scr=%dx%d col=%d,%d,%d/255 vp_set=%d\n",
+			mask, screen_width, screen_height,
+			(int)(gl_state.clear_r * 255), (int)(gl_state.clear_g * 255),
+			(int)(gl_state.clear_b * 255), viewport_set_count);
+	}
+
+	// Clear depth+stencil, then color.
+	pb_set_depth_stencil_buffer_region(
+		NV097_SET_SURFACE_FORMAT_ZETA_Z24S8,
+		0xFFFFFF, 0x00, // depth=max, stencil=0
+		0, 0, screen_width, screen_height);
+
+	if (mask & GL_COLOR_BUFFER_BIT) {
+		unsigned char cr = (unsigned char)(gl_state.clear_r * 255.0f);
+		unsigned char cg = (unsigned char)(gl_state.clear_g * 255.0f);
+		unsigned char cb = (unsigned char)(gl_state.clear_b * 255.0f);
+		unsigned char ca = (unsigned char)(gl_state.clear_a * 255.0f);
+		DWORD color = (ca << 24) | (cr << 16) | (cg << 8) | cb;
+		pb_fill(0, 0, screen_width, screen_height, color);
+	}
+
+	// Wait for clears to complete and reset push buffer before draws
+	{
+		DWORD t0 = KeTickCount;
+		while (pb_busy()) {
+			if (KeTickCount - t0 > 500) {
+				xbox_log("Xbox: glClear pb_busy TIMEOUT after 500 ticks! frame=%d\n", clear_frame_number);
+				break;
+			}
+		}
+		pb_reset();
 	}
 }
 
@@ -759,6 +786,7 @@ static void APIENTRY xbox_glDeleteTextures(GLsizei n, const GLuint *textures)
 		GLuint id = textures[i];
 		if (id > 0 && id < MAX_TEXTURES && texture_table[id].allocated) {
 			if (texture_table[id].addr) {
+				total_texture_bytes -= texture_table[id].alloc_size;
 				MmFreeContiguousMemory(texture_table[id].addr);
 			}
 			memset(&texture_table[id], 0, sizeof(texture_table[id]));
@@ -771,6 +799,10 @@ static void APIENTRY xbox_glBindTexture(GLenum target, GLuint texture)
 	(void)target;
 	int unit = (gl_state.active_texture == GL_TEXTURE1) ? 1 : 0;
 	gl_state.bound_texture[unit] = texture;
+	// Track last-used frame for LRU eviction
+	if (texture > 0 && texture < MAX_TEXTURES && texture_table[texture].allocated) {
+		texture_table[texture].last_used_frame = global_frame_num;
+	}
 }
 
 static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
@@ -800,9 +832,11 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 
 	// Free previous allocation if sizes differ
 	if (tex->allocated && tex->addr && (tex->width != w || tex->height != h)) {
+		total_texture_bytes -= tex->alloc_size;
 		MmFreeContiguousMemory(tex->addr);
 		tex->addr = NULL;
 		tex->allocated = 0;
+		tex->alloc_size = 0;
 	}
 
 	// ALL textures use swizzled (SZ) format for reliable NV2A rendering.
@@ -820,10 +854,50 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 	if (!tex->allocated) {
 		tex->addr = MmAllocateContiguousMemoryEx(alloc_size, 0, MAXRAM, 0,
 			PAGE_READWRITE | PAGE_WRITECOMBINE);
+		// LRU eviction: if allocation fails, free the least-recently-used textures
 		if (!tex->addr) {
-			buildprintf("xbox_glTexImage2D: MmAlloc failed for %dx%d texture\n", aw, ah);
-			return;
+			// Sync GPU before freeing any texture memory — ensures no pending
+			// draw commands reference textures we're about to free
+			pb_reset();
+			draw_since_sync = 0;
+
+			int evicted = 0;
+			for (int attempt = 0; attempt < 64 && !tex->addr; attempt++) {
+				// Find the LRU texture (oldest last_used_frame)
+				int lru_id = -1, lru_frame = 0x7FFFFFFF;
+				for (int t = 1; t < MAX_TEXTURES; t++) {
+					if (t == (int)id) continue; // don't evict ourselves
+					if (!texture_table[t].allocated || !texture_table[t].addr) continue;
+					// Don't evict textures used this frame
+					if (texture_table[t].last_used_frame >= global_frame_num) continue;
+					if (texture_table[t].last_used_frame < lru_frame) {
+						lru_frame = texture_table[t].last_used_frame;
+						lru_id = t;
+					}
+				}
+				if (lru_id < 0) break; // nothing to evict
+				// Evict the LRU texture
+				total_texture_bytes -= texture_table[lru_id].alloc_size;
+				MmFreeContiguousMemory(texture_table[lru_id].addr);
+				texture_table[lru_id].addr = NULL;
+				texture_table[lru_id].allocated = 0;
+				evicted++;
+				// Retry allocation
+				tex->addr = MmAllocateContiguousMemoryEx(alloc_size, 0, MAXRAM, 0,
+					PAGE_READWRITE | PAGE_WRITECOMBINE);
+			}
+			if (evicted > 0) {
+				xbox_log("Xbox: tex evicted %d LRU textures to alloc %dx%d (%d bytes), result=%p total=%d\n",
+					evicted, aw, ah, alloc_size, tex->addr, total_texture_bytes);
+			}
+			if (!tex->addr) {
+				xbox_log("Xbox: tex alloc FAILED %dx%d (%d bytes) total=%d\n",
+					aw, ah, alloc_size, total_texture_bytes);
+				return;
+			}
 		}
+		total_texture_bytes += alloc_size;
+		tex->alloc_size = alloc_size;
 		tex->width = w;
 		tex->height = h;
 		tex->alloc_w = aw;
@@ -833,13 +907,20 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 		tex->swizzled = 1;  // always swizzled now
 		tex->u_scale = (float)w / (float)aw;
 		tex->v_scale = (float)h / (float)ah;
+		tex->last_used_frame = global_frame_num;
+	} else {
+		// Existing texture being re-uploaded — update LRU timestamp
+		tex->last_used_frame = global_frame_num;
 	}
 
 	if (px) {
 		// Build a linear BGRA buffer at the padded POT dimensions,
 		// copy source data into top-left corner, then swizzle into GPU memory.
 		unsigned char *linear = (unsigned char *)calloc(aw * ah * 4, 1); // zero-fill padding
-		if (!linear) return;
+		if (!linear) {
+			xbox_log("Xbox: tex calloc FAILED %dx%d (%d bytes)\n", aw, ah, aw * ah * 4);
+			return;
+		}
 
 		const unsigned char *sp = (const unsigned char *)px;
 		if (fmt == GL_BGRA) {
@@ -1362,9 +1443,15 @@ static void build_viewport_matrix(float *out)
 	float phys_w = vp_w * scale_x;
 	float phys_h = vp_h * scale_y;
 
+	// Convert GL viewport Y (origin at bottom) to NV2A framebuffer Y (origin at top).
+	// GL viewport (x, y, w, h): y is pixels from the bottom of the screen.
+	// NV2A framebuffer: y=0 is the top row.
+	// NV2A top of viewport = screen_height - phys_y - phys_h
+	float nv2a_top = (float)screen_height - phys_y - phys_h;
+
 	// Row-major matrix for v * M (matching mesh sample's matrix_viewport):
 	//   out[0][0]=w/2, out[1][1]=-h/2, out[2][2]=zrange,
-	//   out[3][0]=x+w/2, out[3][1]=y+h/2, out[3][2]=zmin, out[3][3]=1
+	//   out[3][0]=x+w/2, out[3][1]=nv2a_top+h/2, out[3][2]=zmin, out[3][3]=1
 	memset(out, 0, 16 * sizeof(float));
 	out[0]  = phys_w / 2.0f;           // [0][0] = half-width
 	out[5]  = phys_h / -2.0f;          // [1][1] = negative half-height (Y flip)
@@ -1375,7 +1462,7 @@ static void build_viewport_matrix(float *out)
 	float dr_f = depth_range_far;
 	out[10] = (dr_f - dr_n) * 0.5f * 65536.0f;  // [2][2] = z_scale
 	out[12] = phys_x + phys_w / 2.0f;  // [3][0] = x center
-	out[13] = phys_y + phys_h / 2.0f;  // [3][1] = y center
+	out[13] = nv2a_top + phys_h / 2.0f;  // [3][1] = y center (NV2A coords)
 	out[14] = (dr_f + dr_n) * 0.5f * 65536.0f;  // [3][2] = z_offset
 	out[15] = 1.0f;                     // [3][3]
 }
@@ -1572,11 +1659,14 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 {
 	if (!xbox_pbkit_initialized || count <= 0) return;
 
-	// Periodic GPU sync: pbkit's push buffer is 512KB (128 DWORD limit per
-	// pb_begin/pb_end block). Each draw emits ~300 bytes across multiple
-	// blocks. Sync every 200 draws to let the GPU catch up safely.
+	// Periodic GPU sync + push buffer reset: pbkit's push buffer is 512KB.
+	// Each draw emits ~300 bytes across multiple pb_begin/pb_end blocks.
+	// pb_busy() only waits for GPU to catch up but does NOT reclaim buffer
+	// space — pb_Put keeps advancing linearly. pb_reset() both waits AND
+	// resets pb_Put back to pb_Head, giving us a fresh 512KB.
+	// Without this, ~1400 draws per frame overflows the buffer silently.
 	if (++draw_since_sync >= 200) {
-		while (pb_busy()) { /* let GPU catch up */ }
+		pb_reset();
 		draw_since_sync = 0;
 	}
 
@@ -1845,7 +1935,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		memcpy(p, mvp, 16 * 4); p += 16;                      // c[0]-c[3]: MVP
 		memcpy(p, gl_uniforms.colour, 4 * 4); p += 4;          // c[4]: colour
 		{                                                        // c[5]: wclamp
-			static const float c5[4] = { 0.001f, 1.0f, 0.0f, 0.0f };
+			static const float c5[4] = { 0.0001f, 1.0f, 0.0f, 0.0f };
 			memcpy(p, c5, 4 * 4); p += 4;
 		}
 		{                                                        // c[6]: texscale
@@ -2195,6 +2285,7 @@ static void xbox_init_pbkit(void)
 	while (pb_busy()) { /* spin */ }
 
 	xbox_pbkit_initialized = 1;
+	frame_setup_done = 1;  // init already set up the first frame
 }
 
 
@@ -2332,6 +2423,91 @@ void glbuild_check_errors(const char *file, int line)
 void xbox_pbkit_init_for_polymost(void)
 {
 	xbox_init_pbkit();
+}
+
+// Check if a GL texture's GPU memory is still valid (not evicted).
+// Returns 1 if valid, 0 if evicted and needs re-upload.
+int xbox_gl_texture_valid(unsigned int glpic)
+{
+	if (glpic == 0 || glpic >= MAX_TEXTURES) return 0;
+	return (texture_table[glpic].allocated && texture_table[glpic].addr != NULL) ? 1 : 0;
+}
+
+// Shut down pbkit and release all GPU resources.
+// Called from setvideomode when switching back to 8-bit software mode.
+// After this, the PCRTC scanout is restored to the original framebuffer
+// so SDL rendering becomes visible again.
+void xbox_pbkit_shutdown_for_software(void)
+{
+	if (!xbox_pbkit_initialized) return;
+
+	xbox_log("Xbox: pbkit shutdown for software mode\n");
+
+	// Wait for GPU to finish all pending work
+	while (pb_busy()) { /* spin */ }
+
+	// Free all allocated textures
+	for (int i = 0; i < MAX_TEXTURES; i++) {
+		if (texture_table[i].allocated && texture_table[i].addr) {
+			MmFreeContiguousMemory(texture_table[i].addr);
+		}
+		memset(&texture_table[i], 0, sizeof(texture_table[i]));
+	}
+	total_texture_bytes = 0;
+
+	// Free buffer table entries (CPU-side copies)
+	for (int i = 0; i < MAX_BUFFERS; i++) {
+		if (buffer_table[i].cpu_data) {
+			free(buffer_table[i].cpu_data);
+		}
+		memset(&buffer_table[i], 0, sizeof(buffer_table[i]));
+	}
+
+	// Free VBO pool
+	if (vbo_pool) {
+		MmFreeContiguousMemory(vbo_pool);
+		vbo_pool = NULL;
+	}
+	vbo_pool_offset = 0;
+
+	// Free null texture
+	if (null_texture_addr) {
+		MmFreeContiguousMemory(null_texture_addr);
+		null_texture_addr = NULL;
+	}
+
+	// Shut down pbkit DMA engine, restore GPU registers
+	pb_kill();
+
+	// pb_kill() restores old GPU register state, but the CRT controller
+	// and video encoder may not be fully functional. Re-establish the
+	// video mode to ensure the display pipeline is working again.
+	{
+		VIDEO_MODE vm = XVideoGetMode();
+		int w = vm.width > 0 ? vm.width : 640;
+		int h = vm.height > 0 ? vm.height : 480;
+		xbox_log("Xbox: re-establishing video mode %dx%d after pb_kill\n", w, h);
+		XVideoSetMode(w, h, 32, REFRESH_DEFAULT);
+	}
+
+	xbox_pbkit_initialized = 0;
+	screen_width = 0;
+	screen_height = 0;
+
+	// Reset all per-session counters so re-init works cleanly
+	viewport_set_count = 0;
+	clear_frame_number = 0;
+	global_frame_num = 0;
+	frame_setup_done = 0;
+	draw_since_sync = 0;
+	frame_draw_count = 0;
+	frame_skip_count = 0;
+	frame_clip_count = 0;
+	frame_2d_count = 0;
+	frame_depthoff_count = 0;
+	xbox_next_id = 1;
+
+	xbox_log("Xbox: pbkit shutdown complete\n");
 }
 
 // Force the CRT controller to display the back buffer we just rendered to.

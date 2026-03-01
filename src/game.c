@@ -8004,6 +8004,17 @@ int app_main(int argc, char const * const argv[])
     }
 
     configloaded = CONFIG_ReadSetup();
+
+#ifdef _XBOX
+    /* Apply display resolution from config (or default 640x480).
+     * xbox_startup.c set 640x480 as a safe fallback before main();
+     * now switch to the user's configured resolution and rebuild
+     * the valid mode list so polymost uses the right dimensions. */
+    XVideoSetMode(DisplayWidth, DisplayHeight, 32, REFRESH_DEFAULT);
+    validmodecnt = 0;
+    getvalidmodes();
+#endif
+
     if (getenv("DUKE3DGRP")) {
         strncpy(duke3dgrp, getenv("DUKE3DGRP"), BMAX_PATH);
     }
@@ -8416,6 +8427,9 @@ if (VOLUMEONE) {
 
         if( ps[myconnectindex].gm&MODE_EOL || ps[myconnectindex].gm&MODE_RESTART )
         {
+#ifdef _XBOX
+            xbox_log("Xbox: MODE_EOL/RESTART gm=%d bpp=%d\n", ps[myconnectindex].gm, bpp);
+#endif
             if( ps[myconnectindex].gm&MODE_EOL )
             {
                 closedemowrite();
@@ -8426,7 +8440,13 @@ if (VOLUMEONE) {
                 ud.screen_size = 0;
                 vscrn();
                 ud.screen_size = i;
+#ifdef _XBOX
+                xbox_log("Xbox: calling dobonus...\n");
+#endif
                 dobonus(0);
+#ifdef _XBOX
+                xbox_log("Xbox: dobonus returned\n");
+#endif
 
                 if(ud.eog)
                 {
@@ -8451,6 +8471,9 @@ if (!VOLUMEALL) {
 
             ready2send = 0;
             if(numplayers > 1) ps[myconnectindex].gm = MODE_GAME;
+#ifdef _XBOX
+            xbox_log("Xbox: calling enterlevel gm=%d...\n", ps[myconnectindex].gm);
+#endif
             if (enterlevel(ps[myconnectindex].gm)) {
                 backtomenu();
                 goto MAIN_LOOP_RESTART;

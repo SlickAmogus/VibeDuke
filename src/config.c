@@ -93,6 +93,11 @@ int32 EmuMode = 0;
 int32 ForceSetup = 1;
 
 #ifdef _XBOX
+int32 DisplayWidth = 640;
+int32 DisplayHeight = 480;
+#endif
+
+#ifdef _XBOX
 /* Read uses bare name (found via search paths); write uses absolute D:\ path */
 static char setupfilename[256]={"duke3d.cfg"};
 static const char setupwritepath[]="D:\\duke3d.cfg";
@@ -668,6 +673,11 @@ int32 CONFIG_ReadSetup( void )
     SCRIPT_GetNumber( scripthandle, "Screen Setup", "ScreenBPP", &ScreenBPP);
     if (ScreenBPP < 8) ScreenBPP = 8;
 
+#ifdef _XBOX
+    SCRIPT_GetNumber( scripthandle, "Screen Setup", "DisplayWidth", &DisplayWidth);
+    SCRIPT_GetNumber( scripthandle, "Screen Setup", "DisplayHeight", &DisplayHeight);
+#endif
+
     int32 tmpmaxrefreshfreq = 0;
     SCRIPT_GetNumber( scripthandle, "Screen Setup", "MaxRefreshFreq", &tmpmaxrefreshfreq);
     setmaxrefreshfreq(tmpmaxrefreshfreq);
@@ -768,6 +778,10 @@ void CONFIG_WriteSetup( void )
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "ScreenMode",ScreenMode,false,false);
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "ScreenDisplay",ScreenDisplay,false,false);
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "ScreenBPP",ScreenBPP,false,false);
+#ifdef _XBOX
+    SCRIPT_PutNumber( scripthandle, "Screen Setup", "DisplayWidth",DisplayWidth,false,false);
+    SCRIPT_PutNumber( scripthandle, "Screen Setup", "DisplayHeight",DisplayHeight,false,false);
+#endif
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "MaxRefreshFreq",max(0,(int)getmaxrefreshfreq()),false,false);
 #if USE_POLYMOST && USE_OPENGL
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "GLTextureMode",gltexfiltermode,false,false);

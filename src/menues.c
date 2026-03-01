@@ -692,11 +692,12 @@ static void preparevideomenu(void)
 {
 #ifdef _XBOX
     /* Xbox: checkvideomode() is bypassed in setvideomode(), so find the
-     * current mode by matching xdim/ydim against the validmode[] table. */
+     * current mode by matching xdim/ydim/bpp against the validmode[] table. */
     int i;
     curvidmode = newvidmode = 0;
     for (i = 0; i < validmodecnt; i++) {
-        if (validmode[i].xdim == xdim && validmode[i].ydim == ydim) {
+        if (validmode[i].xdim == xdim && validmode[i].ydim == ydim
+                && validmode[i].bpp == bpp) {
             curvidmode = newvidmode = i;
             break;
         }
@@ -2548,7 +2549,10 @@ if (!VOLUMEALL) {
                         break;
 
                     case 1: // Resolution — cycle through modes with matching BPP.
-                        {
+                        // Disable resolution changes in polymost (32bpp) mode.
+                        // Xbox physical display is always 640x480; changing logical
+                        // resolution in polymost breaks the pbkit framebuffer.
+                        if (validmode[newvidmode].bpp != 32) {
                             int dir = uinfo.dir == dir_West ? -1 : 1;
                             int curbpp = validmode[newvidmode].bpp;
                             int mode = newvidmode;
@@ -2594,7 +2598,7 @@ if (!VOLUMEALL) {
             menutext(c,50,0,0,"RENDERER");
             gametext(c+154,50-8,validmode[newvidmode].bpp==32 ? "POLYMOST" : "SOFTWARE",0,2+8+16);
 
-            menutext(c,66,0,0,"RESOLUTION");
+            menutext(c,66,0,validmode[newvidmode].bpp==32,"RESOLUTION");
             snprintf(buf,sizeof(buf),"%d X %d",validmode[newvidmode].xdim,validmode[newvidmode].ydim);
             gametext(c+154,66-8,buf,0,2+8+16);
 
@@ -2745,6 +2749,7 @@ if (!VOLUMEALL) {
         }
 
 #if USE_POLYMOST && USE_OPENGL
+#ifndef _XBOX
         menutext(c,50+62+16+16,0,bpp==8,"FILTERING");
             switch (gltexfiltermode) {
                 case 0: strcpy(buf,"NEAREST"); break;
@@ -2753,6 +2758,7 @@ if (!VOLUMEALL) {
                 default: strcpy(buf,"OTHER"); break;
             }
             menutext(c+154,50+62+16+16,0,bpp==8,buf);
+#endif
 #endif
         break;
 

@@ -27,10 +27,18 @@ Modifications for JonoF's port by Jonathon Fowler (jf@jonof.id.au)
 
 #include "duke3d.h"
 
+#ifdef _XBOX
+extern void xbox_log(const char *fmt, ...);
+#endif
+
 extern unsigned char pow2char[];
 
 static short which_palookup = 9;
+#ifdef _XBOX
+unsigned char useprecache = 0;  // Xbox: disabled — 64MB unified RAM can't hold all level textures at once
+#else
 unsigned char useprecache = 1;
+#endif
 
 static void tloadtile(short tilenume, char type)
 {
@@ -330,6 +338,10 @@ void cacheit(void)
         int done, total, percent;
         int lastdone = -1, lasttotal = -1, lastpercent = -1, lastclock, firstclock;
 
+#ifdef _XBOX
+        buildprintf("cacheit: precache start, totalclock=%d\n", totalclock);
+        xbox_log("cacheit: precache start\n");
+#endif
         firstclock = lastclock = totalclock;
         while (polymost_precache_run(&done, &total)) {
             if (total == 0) {
@@ -359,6 +371,10 @@ void cacheit(void)
             sprintf(buf,"Loading textures ... %d%%\n",percent);
             dofrontscreens(buf);
         }
+#ifdef _XBOX
+        buildprintf("cacheit: precache done, done=%d total=%d\n", done, total);
+        xbox_log("cacheit: precache done, done=%d total=%d\n", done, total);
+#endif
     }
 #endif
 
@@ -1319,6 +1335,11 @@ void dofrontscreens(const char *statustext)
 {
     int i=0;
 
+#ifdef _XBOX
+    buildprintf("dofrontscreens: status=%s bpp=%d xdim=%d ydim=%d\n",
+        statustext ? statustext : "NULL", bpp, xdim, ydim);
+#endif
+
     if(ud.recstat != 2)
     {
         if (!statustext) {
@@ -1330,6 +1351,10 @@ void dofrontscreens(const char *statustext)
         }
 
         clearallviews(0L);
+#ifdef _XBOX
+        buildprintf("dofrontscreens: LOADSCREEN tile %dx%d\n",
+            tilesizx[LOADSCREEN], tilesizy[LOADSCREEN]);
+#endif
         rotatesprite(320<<15,200<<15,65536L,0,LOADSCREEN,0,0,2+8+64,0,0,xdim-1,ydim-1);
 
         if( boardfilename[0] != 0 && ud.level_number == 7 && ud.volume_number == 0 )
@@ -1415,6 +1440,11 @@ int enterlevel(unsigned char g)
     int l;
     char levname[BMAX_PATH+1], *path, *dot;
 
+#ifdef _XBOX
+    buildprintf("enterlevel: g=%d vol=%d lev=%d\n", g, ud.volume_number, ud.level_number);
+    xbox_log("enterlevel: g=%d vol=%d lev=%d bpp=%d\n", g, ud.volume_number, ud.level_number, bpp);
+#endif
+
     if( (g&MODE_DEMO) != MODE_DEMO ) ud.recstat = ud.m_recstat;
     ud.respawn_monsters = ud.m_respawn_monsters;
     ud.respawn_items    = ud.m_respawn_items;
@@ -1433,6 +1463,10 @@ int enterlevel(unsigned char g)
 
     i = ud.screen_size;
     ud.screen_size = 0;
+#ifdef _XBOX
+    buildprintf("enterlevel: dofrontscreens...\n");
+    xbox_log("enterlevel: dofrontscreens...\n");
+#endif
     dofrontscreens(NULL);
     vscrn();
     ud.screen_size = i;
@@ -1442,7 +1476,15 @@ int enterlevel(unsigned char g)
     else
         path = level_file_names[ (ud.volume_number*11)+ud.level_number];
 
+#ifdef _XBOX
+    buildprintf("enterlevel: loadboard %s...\n", path);
+    xbox_log("enterlevel: loadboard %s...\n", path);
+#endif
     l = loadboard( path, VOLUMEONE, &ps[0].posx, &ps[0].posy, &ps[0].posz, &ps[0].ang,&ps[0].cursectnum );
+#ifdef _XBOX
+    buildprintf("enterlevel: loadboard returned %d\n", l);
+    xbox_log("enterlevel: loadboard returned %d\n", l);
+#endif
     if(l == 0)
     {
         strcpy(levname, path);
@@ -1466,7 +1508,7 @@ int enterlevel(unsigned char g)
     }
 
     clearbufbyte(gotpic,sizeof(gotpic),0L);
-    //clearbufbyte(hittype,sizeof(hittype),0l); // JBF 20040531: yes? no?
+    //clearbufbyte(hittype,sizeof(hitpic),0l); // JBF 20040531: yes? no?
 
     prelevel(g);
 
@@ -1478,12 +1520,26 @@ int enterlevel(unsigned char g)
 
     if(ud.recstat != 2) stopmusic();
 
+#ifdef _XBOX
+    buildprintf("enterlevel: cacheit...\n");
+    xbox_log("enterlevel: cacheit...\n");
+#endif
     cacheit();
+#ifdef _XBOX
+    buildprintf("enterlevel: cacheit done\n");
+    xbox_log("enterlevel: cacheit done\n");
+#endif
 
     if(ud.recstat != 2)
     {
         music_select = (ud.volume_number*11) + ud.level_number;
+#ifdef _XBOX
+        xbox_log("enterlevel: playmusic select=%d\n", music_select);
+#endif
         playmusic(&music_fn[0][music_select][0]);
+#ifdef _XBOX
+        xbox_log("enterlevel: playmusic done\n");
+#endif
     }
 
     if( (g&MODE_GAME) || (g&MODE_EOL) )
@@ -1545,10 +1601,22 @@ if (VOLUMEONE) {
      waitforeverybody();
 
      palto(0,0,0,0);
+#ifdef _XBOX
+     xbox_log("enterlevel: vscrn+clearallviews...\n");
+#endif
      vscrn();
      clearallviews(0L);
+#ifdef _XBOX
+     xbox_log("enterlevel: drawbackground...\n");
+#endif
      drawbackground();
+#ifdef _XBOX
+     xbox_log("enterlevel: displayrooms...\n");
+#endif
      displayrooms(myconnectindex,65536);
+#ifdef _XBOX
+     xbox_log("enterlevel: displayrooms done\n");
+#endif
 
      clearbufbyte(playerquitflag,MAXPLAYERS,0x01010101);
      ps[myconnectindex].over_shoulder_on = 0;

@@ -53,6 +53,11 @@ extern int32 ScreenBPP;
 extern int32 EmuMode;
 extern int32 ForceSetup;
 
+#ifdef _XBOX
+extern int32 DisplayWidth;
+extern int32 DisplayHeight;
+#endif
+
 extern byte KeyboardKeys[NUMGAMEFUNCTIONS][2];
 extern int32 MouseFunctions[MAXMOUSEBUTTONS][2];
 extern int32 MouseDigitalFunctions[MAXMOUSEAXES][2];

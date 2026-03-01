@@ -374,17 +374,34 @@ void playmusic(char *fn)
     if (fp < 0) return;
 
     MusicLen = kfilelength( fp );
+#ifdef _XBOX
+    xbox_log("playmusic: MusicLen=%d, calling malloc...\n", MusicLen);
+#endif
     MusicPtr = (char *) malloc(MusicLen);
+#ifdef _XBOX
+    xbox_log("playmusic: malloc returned %p\n", MusicPtr);
+#endif
+    if (!MusicPtr) {
+        kclose(fp);
+#ifdef _XBOX
+        xbox_log("playmusic: malloc FAILED for %d bytes, skipping\n", MusicLen);
+#endif
+        return;
+    }
     kread( fp, MusicPtr, MusicLen);
     kclose( fp );
 #ifdef _XBOX
+    xbox_log("playmusic: file read complete, %d bytes\n", MusicLen);
     xbox_play:
 #endif
-    
+
     if (!memcmp(MusicPtr, "MThd", 4)) {
        MUSIC_PlaySong( MusicPtr, MusicLen, MUSIC_LoopSong );
        MusicIsWaveform = 0;
     } else {
+#ifdef _XBOX
+       xbox_log("playmusic: calling FX_PlayLoopedAuto ptr=%p len=%d...\n", MusicPtr, MusicLen);
+#endif
        MusicVoice = FX_PlayLoopedAuto(MusicPtr, MusicLen, 0, 0, 0,
                                       MusicVolume, MusicVolume, MusicVolume,
 				      FX_MUSIC_PRIORITY, MUSIC_ID);

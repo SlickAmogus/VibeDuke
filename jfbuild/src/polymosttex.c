@@ -2,6 +2,10 @@
 
 #if USE_POLYMOST && USE_OPENGL
 
+#ifdef _XBOX
+extern int xbox_gl_texture_valid(unsigned int glpic);
+#endif
+
 #include "baselayer.h"
 #include "glbuild.h"
 #include "kplib.h"
@@ -576,7 +580,11 @@ static int pt_load(PTHash * pth)
 {
 	if (pth->head.pic[PTHPIC_BASE] &&
 		pth->head.pic[PTHPIC_BASE]->glpic != 0 &&
-		(pth->head.pic[PTHPIC_BASE]->flags & PTH_DIRTY) == 0) {
+		(pth->head.pic[PTHPIC_BASE]->flags & PTH_DIRTY) == 0
+#ifdef _XBOX
+		&& xbox_gl_texture_valid(pth->head.pic[PTHPIC_BASE]->glpic)
+#endif
+		) {
 		return 1;	// loaded
 	}
 
