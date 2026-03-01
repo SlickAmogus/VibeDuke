@@ -6,6 +6,7 @@
 //   c[96]-c[99]:  u_mvp (combined modelview*projection, 4x4)
 //   c[100]:       u_colour (vec4)
 //   c[101]:       u_wclamp (vec4) — .x=near-plane epsilon, .y=1.0
+//   c[102]:       u_texscale (vec4) — .x=U scale, .y=V scale (for POT-padded NPOT textures)
 
 struct vIn {
     float4 pos  : POSITION;   // attribute slot 0
@@ -22,7 +23,8 @@ vOut main(
     vIn              I,
     uniform float4x4 u_mvp,
     uniform float4   u_colour,
-    uniform float4   u_wclamp
+    uniform float4   u_wclamp,
+    uniform float4   u_texscale
     )
 {
     vOut result;
@@ -32,6 +34,6 @@ vOut main(
     result.pos.w = max(result.pos.w, u_wclamp.x);
     result.pos.xyz = result.pos.xyz / result.pos.w;
     result.col  = u_colour;
-    result.tex0 = float4(I.tex, u_wclamp.x, u_wclamp.y);
+    result.tex0 = float4(I.tex.x * u_texscale.x, I.tex.y * u_texscale.y, u_wclamp.x, u_wclamp.y);
     return result;
 }

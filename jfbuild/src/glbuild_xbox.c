@@ -33,6 +33,11 @@
 // 0x1808 = NV097_ARRAY_ELEMENT32: each 32-bit write = 1 individual 32-bit index
 #define NV097_ARRAY_ELEMENT32 0x00001808
 
+// NV2A vertex buffer cache invalidation (from nv_regs.h):
+// Writing to this register forces the NV2A to re-fetch vertex data from
+// the current array offsets, discarding any cached vertex buffer contents.
+#define NV097_BREAK_VERTEX_BUFFER_CACHE 0x00001710
+
 // NV2A immediate vertex data registers (from nv_regs.h):
 // Per-vertex attribute submission: write data directly, no vertex arrays needed.
 // Slot offsets: 2F uses slot*8, 4F uses slot*16.
@@ -110,6 +115,8 @@ static struct {
 static struct xbox_texture {
 	void *addr;        // contiguous GPU memory
 	int width, height, pitch;
+	int alloc_w, alloc_h;  // allocated dimensions (may be POT-padded from original w,h)
+	float u_scale, v_scale; // UV scale: original_w/alloc_w, original_h/alloc_h (1.0 if no padding)
 	int allocated;
 	int swizzled;      // 1 = SZ (Morton-swizzled) format, supports REPEAT wrap
 	int wrap_s, wrap_t;
@@ -121,6 +128,7 @@ static struct xbox_texture {
 // for cache-efficient 2D access. Required for REPEAT wrapping support.
 
 static inline int is_pow2(int v) { return v > 0 && (v & (v - 1)) == 0; }
+static inline int next_pot(int v) { int p = 1; while (p < v) p <<= 1; return p; }
 
 // Swizzle a linear ARGB8 image into NV2A Morton-code order.
 // dst must be w*h*4 bytes. w and h must be powers of two.
@@ -190,6 +198,8 @@ static int frame_skip_count = 0;   // per-frame skipped draws (early returns)
 static int frame_clip_count = 0;   // per-frame clipped draws (near-plane)
 static int global_frame_num = 0;   // monotonic frame counter
 static int draw_since_sync = 0;    // draws since last GPU sync (push buffer overflow prevention)
+static int frame_2d_count = 0;     // per-frame non-perspective (rotatesprite/HUD) draws
+static int frame_depthoff_count = 0; // per-frame draws with depth test disabled
 
 // ---- Vertex attrib pointer state ----
 static struct {
@@ -202,6 +212,10 @@ static struct {
 // ---- Viewport params (saved from glViewport, used to build viewport matrix) ----
 static float vp_x, vp_y, vp_w, vp_h;
 static int vp_valid = 0;
+
+// ---- Depth range (saved from glDepthRange, used in viewport matrix z-transform) ----
+static float depth_range_near = 0.0f;
+static float depth_range_far  = 1.0f;
 
 // ---- Compiled shaders (generated from .cg by nxdk toolchain) ----
 // 11 instructions × 4 uint32_t per instruction = 44 words (w-clamp + perspective divide + TEX0.q=1)
@@ -217,6 +231,7 @@ static void xbox_setup_combiners(void);
 static void xbox_set_attrib_pointer(unsigned int index, unsigned int size,
 	unsigned int stride, const void *data);
 static uint32_t xbox_tex_format_argb8(void);
+static uint32_t xbox_tex_format_argb8_swizzled(int w, int h);
 static void build_viewport_matrix(float *out);
 
 // ====================================================================
@@ -385,21 +400,28 @@ static void xbox_test_draw(void)
 			};
 			float green[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
 
-			// Upload constants to PHYSICAL SLOT 96 (= shader c[0])
+			// Upload constants c[0]-c[6] to PHYSICAL SLOT 96 in one batch
 			p = pb_begin();
 			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_ID, 96);
-			pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 16);
-			memcpy(p, viewport_mvp, 64); p += 16;
-			pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 4);
-			memcpy(p, green, 16); p += 4;
+			pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 28);
+			memcpy(p, viewport_mvp, 64); p += 16;               // c[0]-c[3]: MVP
+			memcpy(p, green, 16); p += 4;                        // c[4]: colour
+			{                                                     // c[5]: wclamp
+				static const float c5[4] = { 0.001f, 1.0f, 0.0f, 0.0f };
+				memcpy(p, c5, 16); p += 4;
+			}
+			{                                                     // c[6]: texscale
+				static const float c6[4] = { 1.0f, 1.0f, 0.0f, 0.0f };
+				memcpy(p, c6, 16); p += 4;
+			}
 			pb_end(p);
 
-			// Combiners + null texture (white 16x16)
+			// Combiners + null texture (white 16x16) — SZ format
 			xbox_setup_combiners();
 			p = pb_begin();
 			p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
 				(DWORD)(uintptr_t)null_texture_addr & 0x03ffffff,
-				xbox_tex_format_argb8());
+				xbox_tex_format_argb8_swizzled(NULL_TEX_SIZE, NULL_TEX_SIZE));
 			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0), NULL_TEX_PITCH << 16);
 			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
 				(NULL_TEX_SIZE << 16) | NULL_TEX_SIZE);
@@ -465,13 +487,16 @@ static void APIENTRY xbox_glClear(GLbitfield mask)
 
 	// Per-frame draw stats (log first 60 frames to capture movement)
 	if (frame_number > 0 && frame_number <= 60) {
-		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d vp=(%d,%d,%d,%d)\n",
+		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d 2d=%d depthoff=%d vp=(%d,%d,%d,%d)\n",
 			frame_number - 1, frame_draw_count, frame_skip_count, frame_clip_count,
+			frame_2d_count, frame_depthoff_count,
 			(int)vp_x, (int)vp_y, (int)vp_w, (int)vp_h);
 	}
 	frame_draw_count = 0;
 	frame_skip_count = 0;
 	frame_clip_count = 0;
+	frame_2d_count = 0;
+	frame_depthoff_count = 0;
 	global_frame_num = frame_number;
 	frame_number++;
 
@@ -503,7 +528,8 @@ static void APIENTRY xbox_glClear(GLbitfield mask)
 	// Wait for clears to complete before 3D setup (matches mesh sample pattern)
 	while (pb_busy()) { /* spin */ }
 
-	// Reset vertex streaming pool and GPU sync counter each frame
+	// Reset VBO streaming pool for the new frame.
+	// Safe: pb_finished() + pb_reset() + pb_busy() above guarantee full GPU idle.
 	vbo_pool_offset = 0;
 	draw_since_sync = 0;
 
@@ -625,8 +651,8 @@ static void APIENTRY xbox_glDepthMask(GLboolean flag)
 
 static void APIENTRY xbox_glDepthRange(GLdouble n, GLdouble f)
 {
-	(void)n; (void)f;
-	// Handled by viewport setup
+	depth_range_near = (float)n;
+	depth_range_far  = (float)f;
 }
 
 static void APIENTRY xbox_glViewport(GLint x, GLint y, GLsizei w, GLsizei h)
@@ -721,6 +747,8 @@ static void APIENTRY xbox_glGenTextures(GLsizei n, GLuint *textures)
 			texture_table[id].wrap_t = GL_REPEAT;
 			texture_table[id].min_filter = GL_NEAREST;
 			texture_table[id].mag_filter = GL_NEAREST;
+			texture_table[id].u_scale = 1.0f;
+			texture_table[id].v_scale = 1.0f;
 		}
 	}
 }
@@ -758,11 +786,11 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 	int unit = (gl_state.active_texture == GL_TEXTURE1) ? 1 : 0;
 	GLuint id = gl_state.bound_texture[unit];
 
-	int use_swizzle_log = is_pow2(w) && is_pow2(h);
+	int native_pot = is_pow2(w) && is_pow2(h);
 	static int tex_upload_count = 0;
 	if (tex_upload_count < 10) {
 		xbox_log("Xbox: glTexImage2D id=%d %dx%d fmt=%x %s px=%p\n",
-			id, w, h, fmt, use_swizzle_log ? "SZ" : "LU", px);
+			id, w, h, fmt, native_pot ? "SZ" : "SZ-PAD", px);
 		tex_upload_count++;
 	}
 
@@ -777,85 +805,67 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 		tex->allocated = 0;
 	}
 
-	// POT textures use swizzled (Morton-code) format which supports REPEAT wrap.
-	// NPOT textures must stay linear (LU_IMAGE) with CLAMP wrap only.
-	int use_swizzle = is_pow2(w) && is_pow2(h);
-
-	// NV2A requires texture pitch aligned to 64 bytes minimum (linear only).
-	// Swizzled textures don't use pitch — data is Morton-ordered, size = w*h*bpp.
-	int src_pitch = w * 4;
-	int pitch = use_swizzle ? (w * 4) : ((src_pitch + 63) & ~63);
-	int alloc_size = use_swizzle ? (w * h * 4) : (pitch * h);
+	// ALL textures use swizzled (SZ) format for reliable NV2A rendering.
+	// NPOT textures are padded to the next power-of-two dimensions.
+	// UV scaling compensates for the padding (stored in tex->u_scale/v_scale).
+	// NV2A SZ format rejects non-square textures where one dimension is 1
+	// (e.g. 1x4 produces NPOT_SIZE=0x00010004 → "invalid data error").
+	// Enforce minimum 2 for both dimensions to avoid this.
+	int aw = next_pot(w);  // allocated width (POT)
+	int ah = next_pot(h);  // allocated height (POT)
+	if (aw < 2) aw = 2;
+	if (ah < 2) ah = 2;
+	int alloc_size = aw * ah * 4;
 
 	if (!tex->allocated) {
 		tex->addr = MmAllocateContiguousMemoryEx(alloc_size, 0, MAXRAM, 0,
 			PAGE_READWRITE | PAGE_WRITECOMBINE);
 		if (!tex->addr) {
-			buildprintf("xbox_glTexImage2D: MmAlloc failed for %dx%d texture\n", w, h);
+			buildprintf("xbox_glTexImage2D: MmAlloc failed for %dx%d texture\n", aw, ah);
 			return;
 		}
 		tex->width = w;
 		tex->height = h;
-		tex->pitch = pitch;
+		tex->alloc_w = aw;
+		tex->alloc_h = ah;
+		tex->pitch = aw * 4;
 		tex->allocated = 1;
-		tex->swizzled = use_swizzle;
+		tex->swizzled = 1;  // always swizzled now
+		tex->u_scale = (float)w / (float)aw;
+		tex->v_scale = (float)h / (float)ah;
 	}
 
 	if (px) {
-		if (use_swizzle) {
-			// POT texture: convert to Morton-swizzled layout for REPEAT wrap support.
-			// First build a linear BGRA buffer, then swizzle into GPU memory.
-			unsigned char *linear = (unsigned char *)malloc(w * h * 4);
-			if (!linear) return;
+		// Build a linear BGRA buffer at the padded POT dimensions,
+		// copy source data into top-left corner, then swizzle into GPU memory.
+		unsigned char *linear = (unsigned char *)calloc(aw * ah * 4, 1); // zero-fill padding
+		if (!linear) return;
 
-			if (fmt == GL_BGRA) {
-				memcpy(linear, px, w * h * 4);
-			} else if (fmt == GL_RGBA) {
-				const unsigned char *sp = (const unsigned char *)px;
-				for (int i = 0; i < w * h; i++) {
-					linear[i*4+0] = sp[i*4+2]; // B
-					linear[i*4+1] = sp[i*4+1]; // G
-					linear[i*4+2] = sp[i*4+0]; // R
-					linear[i*4+3] = sp[i*4+3]; // A
-				}
-			} else {
-				memcpy(linear, px, w * h * 4);
+		const unsigned char *sp = (const unsigned char *)px;
+		if (fmt == GL_BGRA) {
+			for (int row = 0; row < h; row++) {
+				memcpy(linear + row * aw * 4, sp + row * w * 4, w * 4);
 			}
-			swizzle_rect(linear, w * 4, tex->addr, w, h, 4);
-			free(linear);
+		} else if (fmt == GL_RGBA) {
+			for (int row = 0; row < h; row++) {
+				unsigned char *dst = linear + row * aw * 4;
+				const unsigned char *src = sp + row * w * 4;
+				for (int x = 0; x < w; x++) {
+					dst[x*4+0] = src[x*4+2]; // B
+					dst[x*4+1] = src[x*4+1]; // G
+					dst[x*4+2] = src[x*4+0]; // R
+					dst[x*4+3] = src[x*4+3]; // A
+				}
+			}
 		} else {
-			// NPOT texture: linear row-by-row copy with pitch padding
-			if (fmt == GL_BGRA) {
-				const unsigned char *src = (const unsigned char *)px;
-				unsigned char *dst = (unsigned char *)tex->addr;
-				for (int row = 0; row < h; row++) {
-					memcpy(dst, src, src_pitch);
-					src += src_pitch;
-					dst += pitch;
-				}
-			} else if (fmt == GL_RGBA) {
-				const unsigned char *src = (const unsigned char *)px;
-				unsigned char *dst = (unsigned char *)tex->addr;
-				for (int row = 0; row < h; row++) {
-					for (int x = 0; x < w; x++) {
-						dst[x*4+0] = src[x*4+2]; // B
-						dst[x*4+1] = src[x*4+1]; // G
-						dst[x*4+2] = src[x*4+0]; // R
-						dst[x*4+3] = src[x*4+3]; // A
-					}
-					src += src_pitch;
-					dst += pitch;
-				}
-			} else {
-				const unsigned char *src = (const unsigned char *)px;
-				unsigned char *dst = (unsigned char *)tex->addr;
-				for (int row = 0; row < h; row++) {
-					memcpy(dst, src, src_pitch);
-					src += src_pitch;
-					dst += pitch;
-				}
+			for (int row = 0; row < h; row++) {
+				memcpy(linear + row * aw * 4, sp + row * w * 4, w * 4);
 			}
 		}
+
+		swizzle_rect(linear, aw * 4, tex->addr, aw, ah, 4);
+		free(linear);
+
 		// Flush CPU write-combining buffers so GPU sees texture data
 		__asm__ volatile("sfence" ::: "memory");
 	}
@@ -875,12 +885,12 @@ static void APIENTRY xbox_glTexSubImage2D(GLenum target, GLint level,
 	struct xbox_texture *tex = &texture_table[id];
 	const unsigned char *src = (const unsigned char *)px;
 
-	if (tex->swizzled) {
-		// Swizzled texture: write each pixel to its NV2A Morton-code offset.
+	// All textures are now swizzled (POT-padded). Use alloc_w/alloc_h for Morton addressing.
+	{
 		uint8_t *d = (uint8_t *)tex->addr;
 		int log2w = 0, log2h = 0;
-		{ int v = tex->width; while (v > 1) { v >>= 1; log2w++; } }
-		{ int v = tex->height; while (v > 1) { v >>= 1; log2h++; } }
+		{ int v = tex->alloc_w; while (v > 1) { v >>= 1; log2w++; } }
+		{ int v = tex->alloc_h; while (v > 1) { v >>= 1; log2h++; } }
 		for (int row = 0; row < h; row++) {
 			int gy = yo + row;
 			for (int col = 0; col < w; col++) {
@@ -896,25 +906,6 @@ static void APIENTRY xbox_glTexSubImage2D(GLenum target, GLint level,
 				}
 			}
 			src += w * 4;
-		}
-	} else {
-		// Linear texture: simple row-by-row copy
-		unsigned char *dst = (unsigned char *)tex->addr + yo * tex->pitch + xo * 4;
-		for (int row = 0; row < h; row++) {
-			if (fmt == GL_BGRA) {
-				memcpy(dst, src, w * 4);
-			} else if (fmt == GL_RGBA) {
-				for (int i = 0; i < w; i++) {
-					dst[i*4+0] = src[i*4+2]; // B
-					dst[i*4+1] = src[i*4+1]; // G
-					dst[i*4+2] = src[i*4+0]; // R
-					dst[i*4+3] = src[i*4+3]; // A
-				}
-			} else {
-				memcpy(dst, src, w * 4);
-			}
-			src += w * 4;
-			dst += tex->pitch;
 		}
 	}
 	// Flush CPU write-combining buffers so GPU sees texture data
@@ -975,8 +966,13 @@ static void APIENTRY xbox_glCompressedTexImage2D(GLenum target, GLint level,
 	__asm__ volatile("sfence" ::: "memory");
 	tex->width = w;
 	tex->height = h;
+	tex->alloc_w = w;
+	tex->alloc_h = h;
+	tex->u_scale = 1.0f;
+	tex->v_scale = 1.0f;
 	tex->pitch = pitch;
 	tex->allocated = 2; // 2 = compressed
+	tex->swizzled = 0;  // compressed data is not Morton-swizzled
 }
 
 static void APIENTRY xbox_glTexParameteri(GLenum target, GLenum pname, GLint param);
@@ -1056,6 +1052,21 @@ static void APIENTRY xbox_glBufferData(GLenum target, GLsizeiptr size, const voi
 	if (target == GL_ARRAY_BUFFER) {
 		// VBO: copy into contiguous GPU memory streaming pool
 		buf->is_vbo = 1;
+		// Keep a system-memory shadow for CPU-side clipping reads.
+		// Must be done BEFORE updating buf->size so the realloc check
+		// compares against the OLD allocation size, not the new data size.
+		if (data && size > 0) {
+			if (buf->cpu_data && buf->size < (int)size) {
+				free(buf->cpu_data);
+				buf->cpu_data = NULL;
+			}
+			if (!buf->cpu_data) {
+				buf->cpu_data = malloc(size);
+			}
+			if (buf->cpu_data) {
+				memcpy(buf->cpu_data, data, size);
+			}
+		}
 		if (vbo_pool && data) {
 			// Align to 16 bytes
 			int aligned_offset = (vbo_pool_offset + 15) & ~15;
@@ -1357,10 +1368,15 @@ static void build_viewport_matrix(float *out)
 	memset(out, 0, 16 * sizeof(float));
 	out[0]  = phys_w / 2.0f;           // [0][0] = half-width
 	out[5]  = phys_h / -2.0f;          // [1][1] = negative half-height (Y flip)
-	out[10] = 32768.0f;                // [2][2] = z_scale: half of depth range
+	// Z mapping: apply glDepthRange. Maps NDC z [-1,1] to depth buffer
+	// [near*65536, far*65536]. Polymost uses this to give sprites a slight
+	// depth advantage over coplanar walls (wall range [0.00001,1], sprite [0,0.99999]).
+	float dr_n = depth_range_near;
+	float dr_f = depth_range_far;
+	out[10] = (dr_f - dr_n) * 0.5f * 65536.0f;  // [2][2] = z_scale
 	out[12] = phys_x + phys_w / 2.0f;  // [3][0] = x center
 	out[13] = phys_y + phys_h / 2.0f;  // [3][1] = y center
-	out[14] = 32768.0f;                // [3][2] = z_offset: maps NDC z [-1,1] to [0,65536]
+	out[14] = (dr_f + dr_n) * 0.5f * 65536.0f;  // [3][2] = z_offset
 	out[15] = 1.0f;                     // [3][3]
 }
 
@@ -1461,7 +1477,8 @@ static uint32_t xbox_tex_filter(int min_filter, int mag_filter)
 //   3: bottom (y >= -GUARD_BAND * w)
 //   4: top    (y <=  GUARD_BAND * w)
 
-#define NEAR_CLIP_W    1.0f   // minimum clip-space w (near plane)
+#define NEAR_CLIP_W      1.0f    // minimum clip-space w for 3D perspective draws
+#define NEAR_CLIP_W_2D   0.00001f // minimum clip-space w for sprite/HUD draws (must be << 1/1024)
 #define GUARD_BAND_NDC 1.0f   // clip at NDC ±1 = viewport edges (matches real GL frustum)
 
 struct clip_vert {
@@ -1472,10 +1489,13 @@ struct clip_vert {
 #define MAX_CLIP_POLY 8  // max vertices per polygon after 5-plane clipping
 
 // Signed distance to clip plane (positive = inside)
+// near_w: minimum clip-space w threshold for near plane (plane 0)
+static float clip_near_w_threshold = NEAR_CLIP_W;  // set per-draw before clipping
+
 static inline float clip_plane_dist(const struct clip_vert *cv, int plane)
 {
 	switch (plane) {
-		case 0: return cv->cw - NEAR_CLIP_W;
+		case 0: return cv->cw - clip_near_w_threshold;
 		case 1: return cv->cx + GUARD_BAND_NDC * cv->cw;
 		case 2: return GUARD_BAND_NDC * cv->cw - cv->cx;
 		case 3: return cv->cy + GUARD_BAND_NDC * cv->cw;
@@ -1520,6 +1540,7 @@ static int clip_poly_plane(const struct clip_vert *in, int n_in,
 }
 
 // Clip a triangle against all 5 frustum planes, output triangulated result.
+// clip_near_w_threshold must be set before calling (NEAR_CLIP_W or NEAR_CLIP_W_2D).
 // Returns number of output vertices (multiple of 3, or 0).
 static int clip_triangle_frustum(const struct clip_vert tri[3], float *out)
 {
@@ -1551,10 +1572,10 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 {
 	if (!xbox_pbkit_initialized || count <= 0) return;
 
-	// Periodic GPU sync: pbkit's push buffer is 512KB. Each draw emits ~200
-	// bytes, so we can safely do ~2000 draws before risking overflow.
-	// Sync every 500 draws to let the GPU catch up.
-	if (++draw_since_sync >= 500) {
+	// Periodic GPU sync: pbkit's push buffer is 512KB (128 DWORD limit per
+	// pb_begin/pb_end block). Each draw emits ~300 bytes across multiple
+	// blocks. Sync every 200 draws to let the GPU catch up safely.
+	if (++draw_since_sync >= 200) {
 		while (pb_busy()) { /* let GPU catch up */ }
 		draw_since_sync = 0;
 	}
@@ -1616,31 +1637,36 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 	// degenerate vertices. Do NOT add 1 to mvp[15] — that would shift ALL
 	// vertex w values by 1, breaking grotatespriteprojmat (2D sprites rendered
 	// at half size in top-left corner) and slightly perturbing 3D perspective.
+	// NOTE: glDepthRange near/far is baked into the viewport matrix z-transform.
 
 	// ---- CPU-side frustum clipping ----
 	// NV2A PROGRAM mode has no hardware frustum clipping, and the rasterizer's
 	// guard band is limited (~2048px). Vertices outside the guard band cause
-	// stretched triangles. We check 5 planes: near + left/right/top/bottom.
-	//
-	// Only apply for 3D perspective draws where w depends strongly on vertex pos.
-	// Check squared magnitude of the w-column (elements [3],[7],[11]) of mvp_clip.
+	// stretched triangles. We clip ALL draws against 5 frustum planes (near + 4 sides).
+	// For 3D perspective draws, near-clip at w >= 1.0.
+	// For sprite/HUD draws, near-clip at w >= 0.001 (catches behind-camera vertices
+	// that would invert clip-plane equations when w < 0).
 	int need_clip = 0;
 	float w_col_sq = mvp_clip[3]*mvp_clip[3] + mvp_clip[7]*mvp_clip[7] + mvp_clip[11]*mvp_clip[11];
 	int is_3d_perspective = (w_col_sq > 100.0f);
-	if (is_3d_perspective) {
+	float near_w = is_3d_perspective ? NEAR_CLIP_W : NEAR_CLIP_W_2D;
+	{
 		const GLushort *idx = (const GLushort *)((char *)ibo->cpu_data + (intptr_t)indices_offset);
 		int pos_off = attrib_state[XATTR_VERTEX].offset;
 		int pos_stride = attrib_state[XATTR_VERTEX].stride;
+		// Read vertex data from cpu_data (system memory) if available,
+		// otherwise fall back to gpu_addr (write-combined memory).
+		const char *vbo_read = (const char *)(vbo->cpu_data ? vbo->cpu_data : vbo->gpu_addr);
 		int all_out[5] = {1, 1, 1, 1, 1}; // per-plane: all vertices outside?
 		int any_out = 0;
 		for (int i = 0; i < count; i++) {
 			int vi = idx[i];
-			const float *v = (const float *)((char *)vbo->gpu_addr + pos_off + vi * pos_stride);
+			const float *v = (const float *)(vbo_read + pos_off + vi * pos_stride);
 			float cw = v[0]*mvp_clip[3] + v[1]*mvp_clip[7] + v[2]*mvp_clip[11] + mvp_clip[15];
 			float cx = v[0]*mvp_clip[0] + v[1]*mvp_clip[4] + v[2]*mvp_clip[8] + mvp_clip[12];
 			float cy = v[0]*mvp_clip[1] + v[1]*mvp_clip[5] + v[2]*mvp_clip[9] + mvp_clip[13];
 			float d[5];
-			d[0] = cw - NEAR_CLIP_W;
+			d[0] = cw - near_w;
 			d[1] = cx + GUARD_BAND_NDC * cw;
 			d[2] = GUARD_BAND_NDC * cw - cx;
 			d[3] = cy + GUARD_BAND_NDC * cw;
@@ -1652,12 +1678,64 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		}
 		// All vertices outside any single plane → fully invisible
 		for (int p = 0; p < 5; p++) {
-			if (all_out[p]) { frame_skip_count++; return; }
+			if (all_out[p]) {
+				frame_skip_count++;
+				// Log when non-perspective draws are culled (to catch sprite/HUD issues)
+				if (!is_3d_perspective && global_frame_num < 60) {
+					xbox_log("Xbox: F%d 2D CULLED plane=%d cnt=%d tex=%d wcolsq=%d/1000\n",
+						global_frame_num, p, count, gl_state.bound_texture[0],
+						(int)(w_col_sq*1000));
+				}
+				return;
+			}
 		}
 		if (any_out) { need_clip = 1; frame_clip_count++; }
 	}
 
 	frame_draw_count++;
+	if (!is_3d_perspective) frame_2d_count++;
+	if (!gl_state.depth_test_enabled) frame_depthoff_count++;
+
+	// Log details for non-perspective (2D sprite/HUD) draws — first 60 frames, first 10 such draws
+	if (!is_3d_perspective && global_frame_num < 60 && frame_2d_count <= 10) {
+		const GLushort *sp_idx = (const GLushort *)((char *)ibo->cpu_data + (intptr_t)indices_offset);
+		GLuint tid = gl_state.bound_texture[0];
+		xbox_log("Xbox: F%d 2D#%d cnt=%d tex=%d depth=%d blend=%d needclip=%d mode=%x\n",
+			global_frame_num, frame_2d_count, count, tid,
+			gl_state.depth_test_enabled, gl_state.blend_enabled, need_clip, mode);
+		xbox_log("  col=%d,%d,%d,%d/1000 acut=%d/1000 wcolsq=%d/1000\n",
+			(int)(gl_uniforms.colour[0]*1000), (int)(gl_uniforms.colour[1]*1000),
+			(int)(gl_uniforms.colour[2]*1000), (int)(gl_uniforms.colour[3]*1000),
+			(int)(gl_uniforms.alphacut*1000), (int)(w_col_sq*1000));
+		if (tid > 0 && tid < MAX_TEXTURES && texture_table[tid].allocated) {
+			struct xbox_texture *t = &texture_table[tid];
+			xbox_log("  tex: %dx%d alloc=%dx%d sc=%d,%d/1000 addr=%p\n",
+				t->width, t->height, t->alloc_w, t->alloc_h,
+				(int)(t->u_scale*1000), (int)(t->v_scale*1000), t->addr);
+		} else {
+			xbox_log("  tex: NOT FOUND id=%d\n", tid);
+		}
+		// Log vertex positions
+		{
+			int pos_off = attrib_state[XATTR_VERTEX].offset;
+			int pos_stride = attrib_state[XATTR_VERTEX].stride;
+			const char *rd = (const char *)(vbo->cpu_data ? vbo->cpu_data : vbo->gpu_addr);
+			int nlog = count < 4 ? count : 4;
+			for (int j = 0; j < nlog; j++) {
+				int vi = sp_idx[j];
+				const float *vp = (const float *)(rd + pos_off + vi * pos_stride);
+				float cw = vp[0]*mvp_clip[3] + vp[1]*mvp_clip[7] + vp[2]*mvp_clip[11] + mvp_clip[15];
+				float cx = vp[0]*mvp_clip[0] + vp[1]*mvp_clip[4] + vp[2]*mvp_clip[8] + mvp_clip[12];
+				float cy = vp[0]*mvp_clip[1] + vp[1]*mvp_clip[5] + vp[2]*mvp_clip[9] + mvp_clip[13];
+				xbox_log("  v[%d] obj=(%d,%d,%d)/1e6 clip=(%d,%d,w=%d)/1e6\n",
+					vi, (int)(vp[0]*1e6), (int)(vp[1]*1e6), (int)(vp[2]*1e6),
+					(int)(cx*1e6), (int)(cy*1e6), (int)(cw*1e6));
+			}
+		}
+		xbox_log("  vp=(%d,%d,%d,%d) dr=(%d,%d)/1e6\n",
+			(int)vp_x, (int)vp_y, (int)vp_w, (int)vp_h,
+			(int)(depth_range_near*1e6), (int)(depth_range_far*1e6));
+	}
 
 	// Log draws: first 5 per frame, for first 10 frames
 	if (global_frame_num < 10 && frame_draw_count <= 5) {
@@ -1675,9 +1753,8 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			GLuint tid = gl_state.bound_texture[0];
 			if (tid > 0 && tid < MAX_TEXTURES && texture_table[tid].allocated) {
 				struct xbox_texture *t = &texture_table[tid];
-				xbox_log("  tex: %dx%d pitch=%d %s phys=%x\n",
-					t->width, t->height, t->pitch,
-					t->swizzled ? "SZ+REPEAT" : "LU+CLAMP",
+				xbox_log("  tex: %dx%d alloc=%dx%d SZ phys=%x\n",
+					t->width, t->height, t->alloc_w, t->alloc_h,
 					(unsigned)((uintptr_t)t->addr & 0x03ffffff));
 			}
 		}
@@ -1708,8 +1785,8 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 					(int)(vp[0]*1000), (int)(vp[1]*1000), (int)(vp[2]*1000));
 			}
 		}
-		xbox_log("  is3d=%d needclip=%d mvp15=%d/1000\n",
-			is_3d_perspective, need_clip, (int)(mvp[15]*1000));
+		xbox_log("  is3d=%d needclip=%d nearw=%d/1000 mvp15=%d/1000\n",
+			is_3d_perspective, need_clip, (int)(near_w*1000), (int)(mvp[15]*1000));
 		xbox_log("  mvp diag=%d,%d,%d,%d/1000\n",
 			(int)(mvp[0]*1000), (int)(mvp[5]*1000),
 			(int)(mvp[10]*1000), (int)(mvp[15]*1000));
@@ -1726,31 +1803,21 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		}
 	}
 
-	// ---- 1. Upload shader constants ----
-	{
-		uint32_t *p = pb_begin();
-		p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_ID, 96);
-		// MVP matrix: 4 constant registers (c[0]-c[3], physical slot 96+)
-		pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 16);
-		memcpy(p, mvp, 16 * 4); p += 16;
-		// Colour: 1 constant register (c[4])
-		pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 4);
-		memcpy(p, gl_uniforms.colour, 4 * 4); p += 4;
-		// Shader constant c[5] = {epsilon, 1, 0, 0}
-		// .x = near-plane w-clamp epsilon (prevents behind-camera vertex inversion)
-		// .y = 1.0 for TEX0.w (q=1 for 2D_PROJECTIVE texture lookup)
-		{
-			static const float c5[4] = { 0.001f, 1.0f, 0.0f, 0.0f };
-			pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 4);
-			memcpy(p, c5, 4 * 4); p += 4;
-		}
-		pb_end(p);
-	}
+	// ---- DIAGNOSTIC: Full GPU sync before each draw ----
+	// Set to 1 to force the GPU to finish all pending work before each draw.
+	// If this fixes streaking, the root cause is GPU pipelining: the previous
+	// draw's vertex fetch reads from attribute pointers that get overwritten
+	// by the current draw's state setup before the fetch completes.
+	#define SYNC_EVERY_DRAW 0
+	#if SYNC_EVERY_DRAW
+	while (pb_busy()) { /* spin */ }
+	#endif
 
-	// ---- 2. All state setup (single push buffer block) ----
-	// Consolidating texture, alpha test, lighting, and vertex attribs into one
-	// pb_begin/pb_end to avoid push buffer fragmentation that causes
-	// "object state invalid" GPU errors on heavy draw scenes.
+	// ---- 1+2. All per-draw state in a SINGLE push buffer block ----
+	// Shader constants + texture + render state + vertex attribute pointers.
+	// Consolidating into one pb_begin/pb_end block avoids push buffer
+	// fragmentation that causes "object state invalid" GPU errors on heavy
+	// draw scenes. Total worst case: ~78 dwords (well within 128 limit).
 	{
 		GLuint tex_id = gl_state.bound_texture[0];
 		struct xbox_texture *tex = NULL;
@@ -1758,27 +1825,56 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			tex = &texture_table[tex_id];
 		}
 
+		// Crash diagnostic: log EVERY draw in frames 1-2 to find the crasher
+		if (global_frame_num >= 1 && global_frame_num <= 2) {
+			xbox_log("D%d m=%x c=%d t=%d(%dx%d>%dx%d) 3d=%d cl=%d d=%d b=%d\n",
+				frame_draw_count, mode, count, tex_id,
+				tex ? tex->width : 0, tex ? tex->height : 0,
+				tex ? tex->alloc_w : 0, tex ? tex->alloc_h : 0,
+				is_3d_perspective, need_clip,
+				gl_state.depth_test_enabled, gl_state.blend_enabled);
+		}
+
 		uint32_t *p = pb_begin();
+
+		// -- Shader constants: c[0]-c[6] in ONE push (28 dwords) --
+		// Single batch upload avoids per-group headers and ensures the NV2A
+		// constant cursor auto-increments without interruption.
+		p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_ID, 96);
+		pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 28);
+		memcpy(p, mvp, 16 * 4); p += 16;                      // c[0]-c[3]: MVP
+		memcpy(p, gl_uniforms.colour, 4 * 4); p += 4;          // c[4]: colour
+		{                                                        // c[5]: wclamp
+			static const float c5[4] = { 0.001f, 1.0f, 0.0f, 0.0f };
+			memcpy(p, c5, 4 * 4); p += 4;
+		}
+		{                                                        // c[6]: texscale
+			float c6[4] = { 1.0f, 1.0f, 0.0f, 0.0f };
+			if (tex && tex->addr) {
+				c6[0] = tex->u_scale;
+				c6[1] = tex->v_scale;
+			}
+			memcpy(p, c6, 4 * 4); p += 4;
+		}
 
 		// -- Texture stage 0 --
 		if (tex && tex->addr) {
 			uint32_t filter_val = xbox_tex_filter(tex->min_filter, tex->mag_filter);
+			uint32_t wrap_val = xbox_tex_wrap(tex->wrap_s, tex->wrap_t);
 
 			if (tex->swizzled) {
-				// POT swizzled texture: SZ format + REPEAT wrapping
-				uint32_t wrap_val = xbox_tex_wrap(tex->wrap_s, tex->wrap_t);
+				// Uncompressed SZ (swizzled POT) format.
+				// NPOT textures were padded to POT at upload; UV scale in c[6] compensates.
 				p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
 					(DWORD)(uintptr_t)tex->addr & 0x03ffffff,
-					xbox_tex_format_argb8_swizzled(tex->width, tex->height));
-				// Swizzled textures don't use NPOT registers, but we still
-				// set them to safe values (NV2A ignores them for SZ format)
+					xbox_tex_format_argb8_swizzled(tex->alloc_w, tex->alloc_h));
 				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0),
 					tex->pitch << 16);
 				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
-					(tex->width << 16) | tex->height);
+					(tex->alloc_w << 16) | tex->alloc_h);
 				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), wrap_val);
 			} else {
-				// NPOT linear texture: LU_IMAGE format + CLAMP (REPEAT not supported)
+				// Compressed (DXT) or other linear texture — use LU_IMAGE format
 				p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
 					(DWORD)(uintptr_t)tex->addr & 0x03ffffff,
 					xbox_tex_format_argb8());
@@ -1793,7 +1889,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		} else if (null_texture_addr) {
 			p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
 				(DWORD)(uintptr_t)null_texture_addr & 0x03ffffff,
-				xbox_tex_format_argb8());
+				xbox_tex_format_argb8_swizzled(NULL_TEX_SIZE, NULL_TEX_SIZE));
 			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0), NULL_TEX_PITCH << 16);
 			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
 				(NULL_TEX_SIZE << 16) | NULL_TEX_SIZE);
@@ -1833,45 +1929,80 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			p = pb_push1(p, NV097_SET_CULL_FACE, (uint32_t)gl_state.cull_face);
 		}
 
-		pb_end(p);
-	}
+		// -- Vertex attribute pointers (inlined to avoid extra pb_begin/pb_end) --
+		{
+			void *vbo_base = vbo->gpu_addr;
+			if (attrib_state[XATTR_VERTEX].enabled) {
+				unsigned int idx = XATTR_VERTEX;
+				p = pb_push1(p, NV097_SET_VERTEX_DATA_ARRAY_FORMAT + idx * 4,
+					MASK(NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE,
+					     NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F)
+					| MASK(NV097_SET_VERTEX_DATA_ARRAY_FORMAT_SIZE, attrib_state[idx].size)
+					| MASK(NV097_SET_VERTEX_DATA_ARRAY_FORMAT_STRIDE, attrib_state[idx].stride));
+				p = pb_push1(p, NV097_SET_VERTEX_DATA_ARRAY_OFFSET + idx * 4,
+					(uint32_t)(uintptr_t)((char *)vbo_base + attrib_state[idx].offset) & 0x03ffffff);
+			}
+			if (attrib_state[XATTR_TEXCOORD].enabled) {
+				unsigned int idx = XATTR_TEXCOORD;
+				p = pb_push1(p, NV097_SET_VERTEX_DATA_ARRAY_FORMAT + idx * 4,
+					MASK(NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE,
+					     NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_F)
+					| MASK(NV097_SET_VERTEX_DATA_ARRAY_FORMAT_SIZE, attrib_state[idx].size)
+					| MASK(NV097_SET_VERTEX_DATA_ARRAY_FORMAT_STRIDE, attrib_state[idx].stride));
+				p = pb_push1(p, NV097_SET_VERTEX_DATA_ARRAY_OFFSET + idx * 4,
+					(uint32_t)(uintptr_t)((char *)vbo_base + attrib_state[idx].offset) & 0x03ffffff);
+			}
+		}
 
-	// ---- 2b. Set active vertex attribute pointers ----
-	{
-		void *vbo_base = vbo->gpu_addr;
-		if (attrib_state[XATTR_VERTEX].enabled) {
-			xbox_set_attrib_pointer(XATTR_VERTEX,
-				attrib_state[XATTR_VERTEX].size,
-				attrib_state[XATTR_VERTEX].stride,
-				(char *)vbo_base + attrib_state[XATTR_VERTEX].offset);
-		}
-		if (attrib_state[XATTR_TEXCOORD].enabled) {
-			xbox_set_attrib_pointer(XATTR_TEXCOORD,
-				attrib_state[XATTR_TEXCOORD].size,
-				attrib_state[XATTR_TEXCOORD].stride,
-				(char *)vbo_base + attrib_state[XATTR_TEXCOORD].offset);
-		}
+		// -- Invalidate the NV2A vertex buffer cache --
+		// The NV2A caches fetched vertex data by index. Since polymost reuses
+		// the same sequential indices {0,1,2,...} for every draw but uploads
+		// DIFFERENT vertex data to a new VBO pool region each time, the cache
+		// would return stale vertices from a previous draw. This causes the
+		// "streaking during movement" artifact: cached vertices from the old
+		// camera position mixed with fresh vertices from the new position.
+		p = pb_push1(p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0);
+
+		pb_end(p);
 	}
 
 	// ---- 3. Submit geometry ----
 	{
 		const GLushort *src_indices = (const GLushort *)((char *)ibo->cpu_data + (intptr_t)indices_offset);
 
+		// DEBUG: set to 1 to skip all clipped draws (diagnostic for streaking)
+		#define SKIP_CLIPPED_DRAWS 0
+
 		if (need_clip) {
+			#if SKIP_CLIPPED_DRAWS
+			return; // diagnostic: skip clipped draws to test if streaks come from clipper
+			#endif
 			// Frustum clipping path: clip each triangle against all 5 planes,
 			// write clipped vertices to VBO pool, draw as GL_TRIANGLES.
 			int pos_off = attrib_state[XATTR_VERTEX].offset;
 			int pos_stride = attrib_state[XATTR_VERTEX].stride;
 			int tc_off = attrib_state[XATTR_TEXCOORD].enabled ? attrib_state[XATTR_TEXCOORD].offset : 0;
 			int tc_stride = attrib_state[XATTR_TEXCOORD].enabled ? attrib_state[XATTR_TEXCOORD].stride : pos_stride;
+			// Read from system memory shadow (avoids stale WC memory reads)
+			const char *clip_vbo_read = (const char *)(vbo->cpu_data ? vbo->cpu_data : vbo->gpu_addr);
+
+			// Set near-clip threshold for this draw
+			clip_near_w_threshold = near_w;
 
 			// Max output: each triangle can produce up to 18 verts (6 triangles)
 			float clipped[512 * 5];
 			int clipped_count = 0;
 			int max_verts = 512;
 
+			// Compute triangle count based on primitive mode
+			int num_tris;
+			if (mode == GL_TRIANGLES)
+				num_tris = count / 3;
+			else
+				num_tris = count - 2;  // fan or strip
+
 			// Decompose fan/strip into individual triangles, clip each
-			for (int t = 0; t < count - 2 && clipped_count + 18 <= max_verts; t++) {
+			for (int t = 0; t < num_tris && clipped_count + 18 <= max_verts; t++) {
 				int i0, i1, i2;
 				if (mode == GL_TRIANGLE_FAN) {
 					i0 = 0; i1 = t + 1; i2 = t + 2;
@@ -1885,10 +2016,10 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 				struct clip_vert tri[3];
 				int vidx[3] = { src_indices[i0], src_indices[i1], src_indices[i2] };
 				for (int k = 0; k < 3; k++) {
-					const float *pos = (const float *)((char *)vbo->gpu_addr + pos_off + vidx[k] * pos_stride);
+					const float *pos = (const float *)(clip_vbo_read + pos_off + vidx[k] * pos_stride);
 					tri[k].x = pos[0]; tri[k].y = pos[1]; tri[k].z = pos[2];
 					if (attrib_state[XATTR_TEXCOORD].enabled) {
-						const float *uv = (const float *)((char *)vbo->gpu_addr + tc_off + vidx[k] * tc_stride);
+						const float *uv = (const float *)(clip_vbo_read + tc_off + vidx[k] * tc_stride);
 						tri[k].u = uv[0]; tri[k].v = uv[1];
 					} else {
 						tri[k].u = 0.0f; tri[k].v = 0.0f;
@@ -1917,6 +2048,12 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			xbox_set_attrib_pointer(XATTR_VERTEX, 3, 20, clip_vbo);
 			if (attrib_state[XATTR_TEXCOORD].enabled) {
 				xbox_set_attrib_pointer(XATTR_TEXCOORD, 2, 20, (char *)clip_vbo + 12);
+			}
+			// Invalidate vertex buffer cache (clipped data at new address)
+			{
+				uint32_t *pc = pb_begin();
+				pc = pb_push1(pc, NV097_BREAK_VERTEX_BUFFER_CACHE, 0);
+				pb_end(pc);
 			}
 
 			// Draw clipped triangles with sequential indices
