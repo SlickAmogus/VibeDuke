@@ -1093,6 +1093,13 @@ void drawpoly (double *dpx, double *dpy, int n, int method)
 		if (drawingskybox) ptflags |= PTH_SKYBOX;
 
 		pth = PT_GetHead(globalpicnum, globalpal, ptflags, 0);
+#ifdef _XBOX
+		if (!pth) {
+			// Texture load failed (e.g. out of memory). Skip the draw
+			// rather than crashing on null dereference at pth->scalex.
+			return;
+		}
+#endif
 
 		// Base texture.
 		draw.texture0 = 0;

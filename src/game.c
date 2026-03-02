@@ -8274,13 +8274,14 @@ int app_main(int argc, char const * const argv[])
         ScreenMode = 0;
         ScreenDisplay = 0;
 #ifdef _XBOX
-        ScreenWidth = 320;
-        ScreenHeight = 240;
+        ScreenWidth = 640;
+        ScreenHeight = 480;
+        ScreenBPP = 32;
 #else
         ScreenWidth = 640;
         ScreenHeight = 480;
-#endif
         ScreenBPP = 8;
+#endif
         setgamemode(SETGAMEMODE_FULLSCREEN(ScreenDisplay,ScreenMode),ScreenWidth,ScreenHeight,ScreenBPP);
     }
 

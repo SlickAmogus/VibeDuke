@@ -1382,7 +1382,7 @@ void showframe(void)
 		if (bpp != 8) {
 			if (xbox_pbkit_initialized) {
 				static int sf_poly_count = 0;
-				if (sf_poly_count < 5) xbox_log("Xbox: showframe POLYMOST #%d enter\n", sf_poly_count);
+				if (sf_poly_count < 5 || sf_poly_count % 200 == 0) xbox_log("Xbox: showframe POLYMOST #%d enter\n", sf_poly_count);
 				// Wait for GPU to finish all draw commands
 				{
 					DWORD t0 = KeTickCount;
@@ -1404,7 +1404,8 @@ void showframe(void)
 						}
 					}
 				}
-				if (sf_poly_count < 5) { xbox_log("Xbox: showframe pb_finished done\n"); sf_poly_count++; }
+				if (sf_poly_count < 5 || sf_poly_count % 200 == 0) xbox_log("Xbox: showframe #%d done\n", sf_poly_count);
+				sf_poly_count++;
 
 				// Prepare the next frame immediately after flip.
 				// This ensures pb_reset + GPU state setup happens every

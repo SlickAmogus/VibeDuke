@@ -1338,24 +1338,57 @@ void dofrontscreens(const char *statustext)
 #ifdef _XBOX
     buildprintf("dofrontscreens: status=%s bpp=%d xdim=%d ydim=%d\n",
         statustext ? statustext : "NULL", bpp, xdim, ydim);
+
+    // On level restart, the game loop may be interrupted mid-frame, leaving the
+    // push buffer dirty and GL shim state stale. Reset everything so the next
+    // glClear/draw triggers full frame setup (render target, VBO pool, GPU state).
+    {
+        extern void pb_reset(void);
+        extern int pb_busy(void);
+        extern void xbox_force_frame_reset(void);
+        extern volatile DWORD KeTickCount;
+        xbox_log("dofrontscreens: pb_reset + gpu idle wait...\n");
+        pb_reset();
+        { DWORD t0 = KeTickCount; while (pb_busy()) { if (KeTickCount - t0 > 500) break; } }
+        xbox_force_frame_reset();
+        xbox_log("dofrontscreens: gpu idle, frame reset\n");
+
+        // On restart, ~6MB of gameplay textures are still allocated as GPU
+        // contiguous memory. This consumes physical pages that the C heap
+        // also needs.  Free ALL textures so pt_load_art's malloc (for pixel
+        // conversion buffers) can succeed.  All textures will be re-uploaded
+        // on demand when the new level renders.
+        {
+            extern void PTReset(void);
+            xbox_log("dofrontscreens: PTReset (free all textures)...\n");
+            PTReset();
+            xbox_log("dofrontscreens: PTReset done\n");
+        }
+    }
 #endif
 
     if(ud.recstat != 2)
     {
         if (!statustext) {
+            xbox_log("dofrontscreens: setgamepalette...\n");
             setgamepalette(&ps[myconnectindex], palette, 1);    // JBF 20040308
+            xbox_log("dofrontscreens: fadepal...\n");
             fadepal(0,0,0, 0,64,7);
             i = ud.screen_size;
             ud.screen_size = 0;
+            xbox_log("dofrontscreens: vscrn...\n");
             vscrn();
         }
 
+        xbox_log("dofrontscreens: clearallviews...\n");
         clearallviews(0L);
 #ifdef _XBOX
         buildprintf("dofrontscreens: LOADSCREEN tile %dx%d\n",
             tilesizx[LOADSCREEN], tilesizy[LOADSCREEN]);
 #endif
+        xbox_log("dofrontscreens: rotatesprite LOADSCREEN...\n");
         rotatesprite(320<<15,200<<15,65536L,0,LOADSCREEN,0,0,2+8+64,0,0,xdim-1,ydim-1);
+        xbox_log("dofrontscreens: rotatesprite done\n");
 
         if( boardfilename[0] != 0 && ud.level_number == 7 && ud.volume_number == 0 )
         {
@@ -1364,13 +1397,16 @@ void dofrontscreens(const char *statustext)
         }
         else
         {
+            xbox_log("dofrontscreens: menutext...\n");
             menutext(160,90,0,0,"ENTERING");
             menutext(160,90+16+8,0,0,level_names[(ud.volume_number*11) + ud.level_number]);
         }
 
         if (statustext) gametext(160,180,statustext,0,2+8+16);
 
+        xbox_log("dofrontscreens: nextpage...\n");
         nextpage();
+        xbox_log("dofrontscreens: nextpage done\n");
 
         if (!statustext) {
             fadepal(0,0,0, 63,0,-7);

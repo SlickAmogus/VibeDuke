@@ -653,16 +653,20 @@ static int pt_load_art(PTHead * pth)
 
 	tex.pic = (coltype *) malloc(tex.sizx * tex.sizy * sizeof(coltype));
 	if (!tex.pic) {
+#ifdef _XBOX
+		{ extern void xbox_log(const char *fmt, ...);
+		  xbox_log("pt_load_art: tex.pic malloc FAILED pic=%d %dx%d (%d bytes)\n",
+		      pth->picnum, tex.sizx, tex.sizy, (int)(tex.sizx * tex.sizy * sizeof(coltype))); }
+#endif
 		return 0;
 	}
 
 	// fullbright is initialised transparent
 	fbtex.pic = (coltype *) malloc(tex.sizx * tex.sizy * sizeof(coltype));
-	if (!fbtex.pic) {
-		free(tex.pic);
-		return 0;
+	if (fbtex.pic) {
+		memset(fbtex.pic, 0, tex.sizx * tex.sizy * sizeof(coltype));
 	}
-	memset(fbtex.pic, 0, tex.sizx * tex.sizy * sizeof(coltype));
+	// fbtex.pic==NULL is non-fatal: skip glow pass, render main texture only
 
 	if (!waloff[pth->picnum]) {
 		// Force invalid textures to draw something - an almost purely transparency texture
@@ -678,8 +682,8 @@ static int pt_load_art(PTHead * pth)
 				y2 = y-tex.tsizy;
 			}
 			wpptr = &tex.pic[y*tex.sizx];
-			fpptr = &fbtex.pic[y*tex.sizx];
-			for (x = 0; x < tex.sizx; x++, wpptr++, fpptr++) {
+			fpptr = fbtex.pic ? &fbtex.pic[y*tex.sizx] : NULL;
+			for (x = 0; x < tex.sizx; x++, wpptr++, fpptr = fpptr ? fpptr+1 : NULL) {
 				if ((pth->flags & PTH_CLAMPED) && (x >= tex.tsizx || y >= tex.tsizy)) {
 					// Clamp texture
 					wpptr->r = wpptr->g = wpptr->b = wpptr->a = 0;
@@ -709,7 +713,7 @@ static int pt_load_art(PTHead * pth)
 					wpptr->b = britable[curbrightness][ curpalette[dacol].b ];
 				}
 
-				if (dacol >= polymosttexfullbright && dacol < 255) {
+				if (fpptr && dacol >= polymosttexfullbright && dacol < 255) {
 					*fpptr = *wpptr;
 					hasfullbright = 1;
 				}
@@ -732,7 +736,7 @@ static int pt_load_art(PTHead * pth)
 	pth->pic[PTHPIC_BASE]->sizy  = tex.sizy;
 	ptm_uploadtexture(pth->pic[PTHPIC_BASE], pth->flags, &tex, 0);
 
-	if (hasfullbright) {
+	if (hasfullbright && fbtex.pic) {
         id.layer = PTHPIC_GLOW;
 		pth->pic[PTHPIC_GLOW] = PTM_GetHead(&id);
 		pth->pic[PTHPIC_GLOW]->tsizx = tex.tsizx;

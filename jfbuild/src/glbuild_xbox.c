@@ -125,6 +125,13 @@ static struct xbox_texture {
 	int alloc_size;      // size in bytes of the contiguous allocation
 } texture_table[MAX_TEXTURES];
 static int total_texture_bytes = 0;  // total contiguous memory allocated for textures
+#define TEX_BUDGET_BYTES (6 * 1024 * 1024)  // proactive eviction threshold
+
+// Free list for recycling texture IDs deleted via glDeleteTextures.
+// Only explicitly-deleted IDs go here (not LRU-evicted ones), because
+// pt_unload also clears the polymosttex glpic references — making reuse safe.
+static GLuint tex_free_list[MAX_TEXTURES];
+static int tex_free_count = 0;
 
 // ---- NV2A texture swizzling (Morton code) ----
 // NV2A's swizzled (SZ_) texture format interleaves x and y coordinate bits
@@ -183,9 +190,13 @@ static struct xbox_buffer {
 } buffer_table[MAX_BUFFERS];
 
 // ---- Vertex streaming pool (contiguous GPU memory) ----
-#define VBO_POOL_SIZE (8*1024*1024)
+#define VBO_POOL_SIZE (256*1024)  // Peak usage ~33KB; 256KB = 8x headroom
 static void *vbo_pool = NULL;
 static int vbo_pool_offset = 0;
+
+// ---- Persistent staging buffer (reusable across texture uploads) ----
+#define STAGING_BUF_SIZE (512 * 512 * 4)  // 1MB — covers max practical Duke3D texture
+static unsigned char *staging_buf = NULL;
 
 // ---- Null texture (16x16 white, for glow stage when no texture bound) ----
 // NV2A requires minimum pitch alignment; tiny textures get rejected.
@@ -203,6 +214,7 @@ static int global_frame_num = 0;   // monotonic frame counter
 static int draw_since_sync = 0;    // draws since last GPU sync (push buffer overflow prevention)
 static int frame_2d_count = 0;     // per-frame non-perspective (rotatesprite/HUD) draws
 static int frame_depthoff_count = 0; // per-frame draws with depth test disabled
+
 
 // ---- Vertex attrib pointer state ----
 static struct {
@@ -486,12 +498,12 @@ static void xbox_do_frame_start(void)
 	if (frame_number == 0)
 		xbox_log("Xbox: first frame reset done\n");
 
-	// Per-frame draw stats (log first 60 frames)
-	if (frame_number > 0 && frame_number <= 60) {
-		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d 2d=%d depthoff=%d vp=(%d,%d,%d,%d)\n",
+	// Per-frame draw stats (log first 60 frames, then every 100th frame)
+	if (frame_number > 0 && (frame_number <= 60 || frame_number % 100 == 0)) {
+		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d 2d=%d depthoff=%d tex=%d vbo=%d\n",
 			frame_number - 1, frame_draw_count, frame_skip_count, frame_clip_count,
 			frame_2d_count, frame_depthoff_count,
-			(int)vp_x, (int)vp_y, (int)vp_w, (int)vp_h);
+			total_texture_bytes, vbo_pool_offset);
 	}
 	frame_draw_count = 0;
 	frame_skip_count = 0;
@@ -501,6 +513,18 @@ static void xbox_do_frame_start(void)
 	global_frame_num = frame_number;
 	clear_frame_number = ++frame_number;
 
+	// Log peak VBO usage before resetting (diagnostic for pool sizing)
+	{
+		static int peak_vbo = 0;
+		if (vbo_pool_offset > peak_vbo) {
+			peak_vbo = vbo_pool_offset;
+			if (peak_vbo > VBO_POOL_SIZE / 2) {
+				xbox_log("Xbox: VBO peak usage: %d/%d bytes (%.0f%%)\n",
+					peak_vbo, VBO_POOL_SIZE,
+					100.0f * peak_vbo / VBO_POOL_SIZE);
+			}
+		}
+	}
 	// Reset VBO streaming pool for the new frame.
 	vbo_pool_offset = 0;
 	draw_since_sync = 0;
@@ -556,6 +580,13 @@ void xbox_polymost_frame_start(void)
 {
 	if (!xbox_pbkit_initialized) return;
 	xbox_do_frame_start();
+}
+
+// Force a full frame re-setup on next rendering call.
+// Use after an external pb_reset (e.g. level restart mid-frame).
+void xbox_force_frame_reset(void)
+{
+	frame_setup_done = 0;
 }
 
 static void APIENTRY xbox_glClear(GLbitfield mask)
@@ -765,7 +796,12 @@ static void APIENTRY xbox_glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, G
 static void APIENTRY xbox_glGenTextures(GLsizei n, GLuint *textures)
 {
 	for (GLsizei i = 0; i < n; i++) {
-		GLuint id = xbox_next_id++;
+		GLuint id;
+		if (tex_free_count > 0) {
+			id = tex_free_list[--tex_free_count];
+		} else {
+			id = xbox_next_id++;
+		}
 		textures[i] = id;
 		if (id < MAX_TEXTURES) {
 			memset(&texture_table[id], 0, sizeof(texture_table[id]));
@@ -784,12 +820,18 @@ static void APIENTRY xbox_glDeleteTextures(GLsizei n, const GLuint *textures)
 {
 	for (GLsizei i = 0; i < n; i++) {
 		GLuint id = textures[i];
-		if (id > 0 && id < MAX_TEXTURES && texture_table[id].allocated) {
-			if (texture_table[id].addr) {
+		if (id > 0 && id < MAX_TEXTURES) {
+			if (texture_table[id].allocated && texture_table[id].addr) {
 				total_texture_bytes -= texture_table[id].alloc_size;
 				MmFreeContiguousMemory(texture_table[id].addr);
 			}
 			memset(&texture_table[id], 0, sizeof(texture_table[id]));
+			// Recycle this ID for future glGenTextures calls.
+			// Safe because the caller (pt_unload) also clears the
+			// polymosttex glpic references, so no dangling matches.
+			if (tex_free_count < MAX_TEXTURES) {
+				tex_free_list[tex_free_count++] = id;
+			}
 		}
 	}
 }
@@ -851,6 +893,45 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 	if (ah < 2) ah = 2;
 	int alloc_size = aw * ah * 4;
 
+	// Proactive LRU eviction: keep texture memory under budget to avoid
+	// exhausting heap memory (which causes calloc failures and corruption)
+	if (!tex->allocated && total_texture_bytes + alloc_size > TEX_BUDGET_BYTES) {
+		pb_reset();
+		// Wait for GPU 3D pipeline to fully idle before freeing texture memory.
+		// pb_reset() only waits for the DMA engine; the texture fetch units may
+		// still be reading from GPU memory we're about to free.
+		{
+			DWORD t0 = KeTickCount;
+			while (pb_busy()) {
+				if (KeTickCount - t0 > 500) break;
+			}
+		}
+		draw_since_sync = 0;
+		int proactive_evicted = 0;
+		while (total_texture_bytes + alloc_size > TEX_BUDGET_BYTES) {
+			int lru_id = -1, lru_frame = 0x7FFFFFFF;
+			for (int t = 1; t < MAX_TEXTURES; t++) {
+				if (t == (int)id) continue;
+				if (!texture_table[t].allocated || !texture_table[t].addr) continue;
+				if (texture_table[t].last_used_frame >= global_frame_num) continue;
+				if (texture_table[t].last_used_frame < lru_frame) {
+					lru_frame = texture_table[t].last_used_frame;
+					lru_id = t;
+				}
+			}
+			if (lru_id < 0) break;
+			total_texture_bytes -= texture_table[lru_id].alloc_size;
+			MmFreeContiguousMemory(texture_table[lru_id].addr);
+			texture_table[lru_id].addr = NULL;
+			texture_table[lru_id].allocated = 0;
+			proactive_evicted++;
+		}
+		if (proactive_evicted > 0) {
+			xbox_log("Xbox: proactive eviction: freed %d textures, total=%d budget=%d\n",
+				proactive_evicted, total_texture_bytes, TEX_BUDGET_BYTES);
+		}
+	}
+
 	if (!tex->allocated) {
 		tex->addr = MmAllocateContiguousMemoryEx(alloc_size, 0, MAXRAM, 0,
 			PAGE_READWRITE | PAGE_WRITECOMBINE);
@@ -859,6 +940,13 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 			// Sync GPU before freeing any texture memory — ensures no pending
 			// draw commands reference textures we're about to free
 			pb_reset();
+			// Wait for GPU 3D pipeline to fully idle (see proactive eviction comment)
+			{
+				DWORD t0 = KeTickCount;
+				while (pb_busy()) {
+					if (KeTickCount - t0 > 500) break;
+				}
+			}
 			draw_since_sync = 0;
 
 			int evicted = 0;
@@ -916,11 +1004,29 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 	if (px) {
 		// Build a linear BGRA buffer at the padded POT dimensions,
 		// copy source data into top-left corner, then swizzle into GPU memory.
-		unsigned char *linear = (unsigned char *)calloc(aw * ah * 4, 1); // zero-fill padding
-		if (!linear) {
-			xbox_log("Xbox: tex calloc FAILED %dx%d (%d bytes)\n", aw, ah, aw * ah * 4);
-			return;
+		// Use persistent staging buffer to avoid per-call heap allocation failures.
+		int staging_needed = aw * ah * 4;
+		unsigned char *linear;
+		int staging_is_dynamic = 0;
+
+		if (staging_buf && staging_needed <= STAGING_BUF_SIZE) {
+			linear = staging_buf;
+		} else {
+			linear = (unsigned char *)malloc(staging_needed);
+			staging_is_dynamic = 1;
+			if (!linear) {
+				xbox_log("Xbox: tex staging FAILED %dx%d (%d bytes) — undoing GPU alloc\n",
+					aw, ah, staging_needed);
+				// Undo GPU allocation so texture is retried next frame
+				total_texture_bytes -= tex->alloc_size;
+				MmFreeContiguousMemory(tex->addr);
+				tex->addr = NULL;
+				tex->allocated = 0;
+				tex->alloc_size = 0;
+				return;
+			}
 		}
+		memset(linear, 0, staging_needed);
 
 		const unsigned char *sp = (const unsigned char *)px;
 		if (fmt == GL_BGRA) {
@@ -945,7 +1051,10 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 		}
 
 		swizzle_rect(linear, aw * 4, tex->addr, aw, ah, 4);
-		free(linear);
+
+		if (staging_is_dynamic) {
+			free(linear);
+		}
 
 		// Flush CPU write-combining buffers so GPU sees texture data
 		__asm__ volatile("sfence" ::: "memory");
@@ -2246,6 +2355,14 @@ static void xbox_init_pbkit(void)
 		__asm__ volatile("sfence" ::: "memory");
 	}
 
+	// Allocate persistent staging buffer for texture uploads (avoids per-call heap alloc)
+	staging_buf = (unsigned char *)malloc(STAGING_BUF_SIZE);
+	if (staging_buf) {
+		xbox_log("Xbox: staging buffer allocated (%d bytes)\n", STAGING_BUF_SIZE);
+	} else {
+		xbox_log("Xbox: WARNING: staging buffer alloc FAILED, using per-call malloc\n");
+	}
+
 	// Target the back buffer FIRST — this sets up render surface, DMA channels,
 	// depth/stencil, and buffer format. Must happen before shader setup so that
 	// set_draw_buffer's state doesn't overwrite our PROGRAM mode.
@@ -2476,6 +2593,12 @@ void xbox_pbkit_shutdown_for_software(void)
 		null_texture_addr = NULL;
 	}
 
+	// Free staging buffer
+	if (staging_buf) {
+		free(staging_buf);
+		staging_buf = NULL;
+	}
+
 	// Shut down pbkit DMA engine, restore GPU registers
 	pb_kill();
 
@@ -2506,6 +2629,7 @@ void xbox_pbkit_shutdown_for_software(void)
 	frame_2d_count = 0;
 	frame_depthoff_count = 0;
 	xbox_next_id = 1;
+	tex_free_count = 0;
 
 	xbox_log("Xbox: pbkit shutdown complete\n");
 }

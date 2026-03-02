@@ -241,10 +241,15 @@ int SDLDrv_PCM_Init(int * mixrate, int * numchannels, int * samplebits, void * i
     spec.callback = fillData;
     spec.userdata = 0;
 
+#ifdef _XBOX
+    // Xbox AC97: use larger buffer to prevent SFX crackling from scheduling jitter
+    spec.samples = 8192;
+#else
     // Mix buffer to be a power of 2, min 512 samples, and 4096 samples at 48kHz.
     spec.samples = 512;
     while (spec.samples < (4096 * *mixrate / 48000))
         spec.samples += spec.samples;
+#endif
 
     memset(&actual, 0, sizeof(actual));
 
