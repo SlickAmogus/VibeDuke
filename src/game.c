@@ -291,6 +291,7 @@ static char const *duke3ddef = "duke3d.def";
 //task *TimerPtr=NULL;
 
 extern int lastvisinc;
+extern int xdimenscale, ydimen;
 
 void setgamepalette(struct player_struct *player, unsigned char *pal, int set)
 {
@@ -2650,7 +2651,16 @@ void displayrest(int smoothratio)
     }
 
     if(ps[myconnectindex].newowner == -1 && ud.overhead_on == 0 && ud.crosshair && ud.camerasprite == -1)
-        rotatesprite((160-(ps[myconnectindex].look_ang>>1))<<16,100L<<16,65536L,0,CROSSHAIR,0,0,2+1,windowx1,windowy1,windowx2,windowy2);
+    {
+        // Adjust crosshair Y to match hitscan aim point in polymost renderer.
+        // Polymost uses perspective rotation while hitscan uses a linear model,
+        // causing the crosshair to diverge from actual bullet impact at non-zero
+        // look angles. The correction is: delta = (h-100) * gyxscale * 200 / (8 * ydimen)
+        // in virtual pixels, computed here in 16.16 fixed point via scale().
+        int dhoriz = ps[myconnectindex].horiz + ps[myconnectindex].horizoff - 100;
+        long crosshair_y = (100L<<16) + scale(dhoriz * 25, xdimenscale, 2 * ydimen);
+        rotatesprite((160-(ps[myconnectindex].look_ang>>1))<<16,crosshair_y,65536L,0,CROSSHAIR,0,0,2+1,windowx1,windowy1,windowx2,windowy2);
+    }
 
     if(ps[myconnectindex].gm&MODE_TYPE)
         typemode();

@@ -788,11 +788,13 @@ void polymost_drawpoly_glcall(GLenum mode, struct polymostdrawpolycall *draw)
 	polymostcallcounts.drawpoly_glcall++;
 #endif
 
+#ifndef _XBOX
 	glfunc.glUseProgram(polymostglsl.program);
+#endif
 
 #if (USE_OPENGL == USE_GL3)
     glfunc.glBindVertexArray(polymostglsl.vao);
-#else
+#elif !defined(_XBOX)
     glfunc.glEnableVertexAttribArray(polymostglsl.attrib_vertex);
     glfunc.glEnableVertexAttribArray(polymostglsl.attrib_texcoord);
 #endif
@@ -817,11 +819,16 @@ void polymost_drawpoly_glcall(GLenum mode, struct polymostdrawpolycall *draw)
 	glfunc.glVertexAttribPointer(polymostglsl.attrib_texcoord, 2, GL_FLOAT, GL_FALSE,
 		sizeof(struct polymostvboitem), (const GLvoid *)offsetof(struct polymostvboitem, t));
 
+#ifdef _XBOX
+	// Xbox: skip glActiveTexture (only unit 0 used), bind texture0 directly
+	glfunc.glBindTexture(GL_TEXTURE_2D, draw->texture0);
+#else
 	glfunc.glActiveTexture(GL_TEXTURE0);
 	glfunc.glBindTexture(GL_TEXTURE_2D, draw->texture0);
 
 	glfunc.glActiveTexture(GL_TEXTURE1);
 	glfunc.glBindTexture(GL_TEXTURE_2D, draw->texture1 ? draw->texture1 : nulltexture);
+#endif
 
 	glfunc.glUniform1f(polymostglsl.uniform_alphacut, draw->alphacut);
 
@@ -829,6 +836,9 @@ void polymost_drawpoly_glcall(GLenum mode, struct polymostdrawpolycall *draw)
 		polymostglsl.uniform_colour,
 		draw->colour.r, draw->colour.g, draw->colour.b, draw->colour.a
 	);
+
+#ifndef _XBOX
+	// Xbox: fog and gamma handled by fixed-function combiner, not per-draw uniforms
 	glfunc.glUniform4f(
 		polymostglsl.uniform_fogcolour,
 		draw->fogcolour.r, draw->fogcolour.g, draw->fogcolour.b, draw->fogcolour.a
@@ -837,17 +847,20 @@ void polymost_drawpoly_glcall(GLenum mode, struct polymostdrawpolycall *draw)
 		polymostglsl.uniform_fogdensity,
 		draw->fogdensity
 	);
+#endif
 
 	glfunc.glUniformMatrix4fv(polymostglsl.uniform_modelview, 1, GL_FALSE, draw->modelview);
 	glfunc.glUniformMatrix4fv(polymostglsl.uniform_projection, 1, GL_FALSE, draw->projection);
 
+#ifndef _XBOX
 	glfunc.glUniform1f(polymostglsl.uniform_gamma, usegammabrightness == 1 ? curgamma : 1.0);
+#endif
 
 	glfunc.glDrawElements(mode, draw->indexcount, GL_UNSIGNED_SHORT, 0);
 
 #if (USE_OPENGL == USE_GL3)
     glfunc.glBindVertexArray(0);
-#else
+#elif !defined(_XBOX)
 	glfunc.glDisableVertexAttribArray(polymostglsl.attrib_vertex);
 	glfunc.glDisableVertexAttribArray(polymostglsl.attrib_texcoord);
 #endif

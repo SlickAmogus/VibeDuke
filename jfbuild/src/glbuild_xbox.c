@@ -513,6 +513,8 @@ static void xbox_do_frame_start(void)
 	global_frame_num = frame_number;
 	clear_frame_number = ++frame_number;
 
+	draw_since_sync = 0;  // reset since pb_reset was just called
+
 	// Log peak VBO usage before resetting (diagnostic for pool sizing)
 	{
 		static int peak_vbo = 0;
@@ -1774,7 +1776,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 	// space — pb_Put keeps advancing linearly. pb_reset() both waits AND
 	// resets pb_Put back to pb_Head, giving us a fresh 512KB.
 	// Without this, ~1400 draws per frame overflows the buffer silently.
-	if (++draw_since_sync >= 200) {
+	if (++draw_since_sync >= 1200) {
 		pb_reset();
 		draw_since_sync = 0;
 	}
@@ -1783,14 +1785,10 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 	GLuint ibo_id = gl_state.bound_ibo;
 	if (vbo_id == 0 || vbo_id >= MAX_BUFFERS) {
 		frame_skip_count++;
-		if (global_frame_num < 5)
-			xbox_log("Xbox: SKIP vbo_id=%d ibo_id=%d (bad id)\n", vbo_id, ibo_id);
 		return;
 	}
 	if (ibo_id == 0 || ibo_id >= MAX_BUFFERS) {
 		frame_skip_count++;
-		if (global_frame_num < 5)
-			xbox_log("Xbox: SKIP ibo_id=%d (bad id)\n", ibo_id);
 		return;
 	}
 
@@ -1815,20 +1813,8 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		float vp_mat[16];
 		build_viewport_matrix(vp_mat);
 		mat4_multiply(mvp, mvp_clip, vp_mat);
-		// Log viewport bake details for first few draws
-		if (global_frame_num < 3 && frame_draw_count < 3) {
-			xbox_log("  VP BAKE: vp=(%d,%d,%d,%d) scr=%dx%d\n",
-				(int)vp_x, (int)vp_y, (int)vp_w, (int)vp_h,
-				screen_width, screen_height);
-			xbox_log("  vp_mat diag=%d,%d,%d,%d/1000\n",
-				(int)(vp_mat[0]*1000), (int)(vp_mat[5]*1000),
-				(int)(vp_mat[10]*1000), (int)(vp_mat[15]*1000));
-		}
 	} else {
 		memcpy(mvp, mvp_clip, sizeof(mvp));
-		if (global_frame_num < 3 && frame_draw_count < 3) {
-			xbox_log("  VP SKIP: vp_valid=0\n");
-		}
 	}
 
 	// Note: mvp[15]==0 is normal for gdrawroomsprojmat and grotatespriteprojmat.
@@ -1879,12 +1865,13 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		for (int p = 0; p < 5; p++) {
 			if (all_out[p]) {
 				frame_skip_count++;
-				// Log when non-perspective draws are culled (to catch sprite/HUD issues)
+	#ifdef XBOX_DRAW_LOGGING
 				if (!is_3d_perspective && global_frame_num < 60) {
 					xbox_log("Xbox: F%d 2D CULLED plane=%d cnt=%d tex=%d wcolsq=%d/1000\n",
 						global_frame_num, p, count, gl_state.bound_texture[0],
 						(int)(w_col_sq*1000));
 				}
+#endif
 				return;
 			}
 		}
@@ -1895,7 +1882,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 	if (!is_3d_perspective) frame_2d_count++;
 	if (!gl_state.depth_test_enabled) frame_depthoff_count++;
 
-	// Log details for non-perspective (2D sprite/HUD) draws — first 60 frames, first 10 such draws
+#ifdef XBOX_DRAW_LOGGING
 	if (!is_3d_perspective && global_frame_num < 60 && frame_2d_count <= 10) {
 		const GLushort *sp_idx = (const GLushort *)((char *)ibo->cpu_data + (intptr_t)indices_offset);
 		GLuint tid = gl_state.bound_texture[0];
@@ -1914,7 +1901,6 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		} else {
 			xbox_log("  tex: NOT FOUND id=%d\n", tid);
 		}
-		// Log vertex positions
 		{
 			int pos_off = attrib_state[XATTR_VERTEX].offset;
 			int pos_stride = attrib_state[XATTR_VERTEX].stride;
@@ -1935,8 +1921,9 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			(int)vp_x, (int)vp_y, (int)vp_w, (int)vp_h,
 			(int)(depth_range_near*1e6), (int)(depth_range_far*1e6));
 	}
+#endif
 
-	// Log draws: first 5 per frame, for first 10 frames
+#ifdef XBOX_DRAW_LOGGING
 	if (global_frame_num < 10 && frame_draw_count <= 5) {
 		const GLushort *log_idx = (const GLushort *)((char *)ibo->cpu_data + (intptr_t)indices_offset);
 		int n = count < 4 ? count : 4;
@@ -1960,20 +1947,17 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		xbox_log("  idx=");
 		for (int j = 0; j < n; j++) xbox_log("%d ", (int)log_idx[j]);
 		xbox_log("\n");
-		// Log UV values — read from IBO's cpu_data side to avoid WC memory issues
 		if (attrib_state[XATTR_TEXCOORD].enabled) {
 			int tc_off = attrib_state[XATTR_TEXCOORD].offset;
 			int tc_stride = attrib_state[XATTR_TEXCOORD].stride;
 			xbox_log("  tc: off=%d stride=%d size=%d\n",
 				tc_off, tc_stride, attrib_state[XATTR_TEXCOORD].size);
-			// Read raw hex from VBO GPU memory to check data
 			for (int j = 0; j < n && j < 4; j++) {
 				int vi = log_idx[j];
 				uint32_t *raw = (uint32_t *)((char *)vbo->gpu_addr + tc_off + vi * tc_stride);
 				xbox_log("  uv[%d] hex=%08x %08x\n", vi, raw[0], raw[1]);
 			}
 		}
-		// Log vertex positions (xyz) for first 2 verts
 		{
 			int pos_off = attrib_state[XATTR_VERTEX].offset;
 			int pos_stride = attrib_state[XATTR_VERTEX].stride;
@@ -1989,7 +1973,6 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		xbox_log("  mvp diag=%d,%d,%d,%d/1000\n",
 			(int)(mvp[0]*1000), (int)(mvp[5]*1000),
 			(int)(mvp[10]*1000), (int)(mvp[15]*1000));
-		// Log full MVP matrix for first 2 draws of first 2 frames
 		if (global_frame_num < 2 && frame_draw_count <= 2) {
 			xbox_log("  mvp row0=(%d,%d,%d,%d)/1000\n",
 				(int)(mvp[0]*1000),(int)(mvp[1]*1000),(int)(mvp[2]*1000),(int)(mvp[3]*1000));
@@ -2001,6 +1984,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 				(int)(mvp[12]*1000),(int)(mvp[13]*1000),(int)(mvp[14]*1000),(int)(mvp[15]*1000));
 		}
 	}
+#endif
 
 	// ---- DIAGNOSTIC: Full GPU sync before each draw ----
 	// Set to 1 to force the GPU to finish all pending work before each draw.
@@ -2012,11 +1996,8 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 	while (pb_busy()) { /* spin */ }
 	#endif
 
-	// ---- 1+2. All per-draw state in a SINGLE push buffer block ----
-	// Shader constants + texture + render state + vertex attribute pointers.
-	// Consolidating into one pb_begin/pb_end block avoids push buffer
-	// fragmentation that causes "object state invalid" GPU errors on heavy
-	// draw scenes. Total worst case: ~78 dwords (well within 128 limit).
+	// ---- 1+2. Per-draw state with dirty-bit tracking ----
+	// Write all NV2A state for this draw call.
 	{
 		GLuint tex_id = gl_state.bound_texture[0];
 		struct xbox_texture *tex = NULL;
@@ -2024,7 +2005,13 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			tex = &texture_table[tex_id];
 		}
 
-		// Crash diagnostic: log EVERY draw in frames 1-2 to find the crasher
+		float cur_texscale[2] = { 1.0f, 1.0f };
+		if (tex && tex->addr) {
+			cur_texscale[0] = tex->u_scale;
+			cur_texscale[1] = tex->v_scale;
+		}
+
+#ifdef XBOX_DRAW_LOGGING
 		if (global_frame_num >= 1 && global_frame_num <= 2) {
 			xbox_log("D%d m=%x c=%d t=%d(%dx%d>%dx%d) 3d=%d cl=%d d=%d b=%d\n",
 				frame_draw_count, mode, count, tex_id,
@@ -2033,12 +2020,11 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 				is_3d_perspective, need_clip,
 				gl_state.depth_test_enabled, gl_state.blend_enabled);
 		}
+#endif
 
 		uint32_t *p = pb_begin();
 
-		// -- Shader constants: c[0]-c[6] in ONE push (28 dwords) --
-		// Single batch upload avoids per-group headers and ensures the NV2A
-		// constant cursor auto-increments without interruption.
+		// -- Shader constants c[0]-c[6] --
 		p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_ID, 96);
 		pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 28);
 		memcpy(p, mvp, 16 * 4); p += 16;                      // c[0]-c[3]: MVP
@@ -2048,11 +2034,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			memcpy(p, c5, 4 * 4); p += 4;
 		}
 		{                                                        // c[6]: texscale
-			float c6[4] = { 1.0f, 1.0f, 0.0f, 0.0f };
-			if (tex && tex->addr) {
-				c6[0] = tex->u_scale;
-				c6[1] = tex->v_scale;
-			}
+			float c6[4] = { cur_texscale[0], cur_texscale[1], 0.0f, 0.0f };
 			memcpy(p, c6, 4 * 4); p += 4;
 		}
 
@@ -2060,10 +2042,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		if (tex && tex->addr) {
 			uint32_t filter_val = xbox_tex_filter(tex->min_filter, tex->mag_filter);
 			uint32_t wrap_val = xbox_tex_wrap(tex->wrap_s, tex->wrap_t);
-
 			if (tex->swizzled) {
-				// Uncompressed SZ (swizzled POT) format.
-				// NPOT textures were padded to POT at upload; UV scale in c[6] compensates.
 				p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
 					(DWORD)(uintptr_t)tex->addr & 0x03ffffff,
 					xbox_tex_format_argb8_swizzled(tex->alloc_w, tex->alloc_h));
@@ -2073,7 +2052,6 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 					(tex->alloc_w << 16) | tex->alloc_h);
 				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), wrap_val);
 			} else {
-				// Compressed (DXT) or other linear texture — use LU_IMAGE format
 				p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
 					(DWORD)(uintptr_t)tex->addr & 0x03ffffff,
 					xbox_tex_format_argb8());
@@ -2109,7 +2087,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			p = pb_push1(p, NV097_SET_ALPHA_TEST_ENABLE, 0);
 		}
 
-		// -- Deferred render state (blend, depth, cull) --
+		// -- Render state: blend, depth, cull --
 		p = pb_push1(p, NV097_SET_BLEND_ENABLE, gl_state.blend_enabled);
 		if (gl_state.blend_enabled) {
 			p = pb_push1(p, NV097_SET_BLEND_FUNC_SFACTOR, (uint32_t)gl_state.blend_sfactor);
@@ -2128,10 +2106,12 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			p = pb_push1(p, NV097_SET_CULL_FACE, (uint32_t)gl_state.cull_face);
 		}
 
-		// -- Vertex attribute pointers (inlined to avoid extra pb_begin/pb_end) --
+		// -- Vertex attribute pointers (VBO offset changes every draw) --
+		// Note: attrib_state[].enabled checks removed; polymost always uses
+		// vertex + texcoord, and Xbox skips glEnable/DisableVertexAttribArray.
 		{
 			void *vbo_base = vbo->gpu_addr;
-			if (attrib_state[XATTR_VERTEX].enabled) {
+			{
 				unsigned int idx = XATTR_VERTEX;
 				p = pb_push1(p, NV097_SET_VERTEX_DATA_ARRAY_FORMAT + idx * 4,
 					MASK(NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE,
@@ -2141,7 +2121,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 				p = pb_push1(p, NV097_SET_VERTEX_DATA_ARRAY_OFFSET + idx * 4,
 					(uint32_t)(uintptr_t)((char *)vbo_base + attrib_state[idx].offset) & 0x03ffffff);
 			}
-			if (attrib_state[XATTR_TEXCOORD].enabled) {
+			{
 				unsigned int idx = XATTR_TEXCOORD;
 				p = pb_push1(p, NV097_SET_VERTEX_DATA_ARRAY_FORMAT + idx * 4,
 					MASK(NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE,
@@ -2153,13 +2133,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			}
 		}
 
-		// -- Invalidate the NV2A vertex buffer cache --
-		// The NV2A caches fetched vertex data by index. Since polymost reuses
-		// the same sequential indices {0,1,2,...} for every draw but uploads
-		// DIFFERENT vertex data to a new VBO pool region each time, the cache
-		// would return stale vertices from a previous draw. This causes the
-		// "streaking during movement" artifact: cached vertices from the old
-		// camera position mixed with fresh vertices from the new position.
+		// -- Invalidate the NV2A vertex buffer cache (always required) --
 		p = pb_push1(p, NV097_BREAK_VERTEX_BUFFER_CACHE, 0);
 
 		pb_end(p);
@@ -2180,8 +2154,8 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 			// write clipped vertices to VBO pool, draw as GL_TRIANGLES.
 			int pos_off = attrib_state[XATTR_VERTEX].offset;
 			int pos_stride = attrib_state[XATTR_VERTEX].stride;
-			int tc_off = attrib_state[XATTR_TEXCOORD].enabled ? attrib_state[XATTR_TEXCOORD].offset : 0;
-			int tc_stride = attrib_state[XATTR_TEXCOORD].enabled ? attrib_state[XATTR_TEXCOORD].stride : pos_stride;
+			int tc_off = attrib_state[XATTR_TEXCOORD].offset;
+			int tc_stride = attrib_state[XATTR_TEXCOORD].stride;
 			// Read from system memory shadow (avoids stale WC memory reads)
 			const char *clip_vbo_read = (const char *)(vbo->cpu_data ? vbo->cpu_data : vbo->gpu_addr);
 
@@ -2217,11 +2191,9 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 				for (int k = 0; k < 3; k++) {
 					const float *pos = (const float *)(clip_vbo_read + pos_off + vidx[k] * pos_stride);
 					tri[k].x = pos[0]; tri[k].y = pos[1]; tri[k].z = pos[2];
-					if (attrib_state[XATTR_TEXCOORD].enabled) {
+					{
 						const float *uv = (const float *)(clip_vbo_read + tc_off + vidx[k] * tc_stride);
 						tri[k].u = uv[0]; tri[k].v = uv[1];
-					} else {
-						tri[k].u = 0.0f; tri[k].v = 0.0f;
 					}
 					tri[k].cx = pos[0]*mvp_clip[0] + pos[1]*mvp_clip[4] + pos[2]*mvp_clip[8] + mvp_clip[12];
 					tri[k].cy = pos[0]*mvp_clip[1] + pos[1]*mvp_clip[5] + pos[2]*mvp_clip[9] + mvp_clip[13];
@@ -2245,9 +2217,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 
 			// Re-point attribs to clipped vertex data (stride=20, pos@0, uv@12)
 			xbox_set_attrib_pointer(XATTR_VERTEX, 3, 20, clip_vbo);
-			if (attrib_state[XATTR_TEXCOORD].enabled) {
-				xbox_set_attrib_pointer(XATTR_TEXCOORD, 2, 20, (char *)clip_vbo + 12);
-			}
+			xbox_set_attrib_pointer(XATTR_TEXCOORD, 2, 20, (char *)clip_vbo + 12);
 			// Invalidate vertex buffer cache (clipped data at new address)
 			{
 				uint32_t *pc = pb_begin();
