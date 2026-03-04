@@ -99,23 +99,29 @@ void MV_Mix16BitMono8Stereo( unsigned int position, unsigned int rate,
                      char *start, unsigned int length )
 {
     unsigned char *source = (unsigned char *) start;
+#ifdef _XBOX
+    int *dest = (int *) MV_MixDestination;
+#else
     short *dest = (short *) MV_MixDestination;
+#endif
     int sample0, sample1;
-    
+
     while (length--) {
         sample0 = source[(position >> 16) << 1];
         sample1 = source[((position >> 16) << 1) + 1];
         position += rate;
-        
+
         sample0 = (MV_LeftVolume[sample0] + MV_LeftVolume[sample1]) / 2 + *dest;
+#ifndef _XBOX
         if (sample0 < -32768) sample0 = -32768;
         else if (sample0 > 32767) sample0 = 32767;
-        
-        *dest = (short) sample0;
-        
+#endif
+
+        *dest = sample0;
+
         dest += MV_SampleSize / 2;
     }
-    
+
     MV_MixPosition = position;
     MV_MixDestination = (char *) dest;
 }
@@ -125,27 +131,33 @@ void MV_Mix16BitStereo8Stereo( unsigned int position, unsigned int rate,
                        char *start, unsigned int length )
 {
     unsigned char *source = (unsigned char *) start;
+#ifdef _XBOX
+    int *dest = (int *) MV_MixDestination;
+#else
     short *dest = (short *) MV_MixDestination;
+#endif
     int sample0, sample1;
-    
+
     while (length--) {
         sample0 = source[(position >> 16) << 1];
         sample1 = source[((position >> 16) << 1) + 1];
         position += rate;
-        
+
         sample0 = MV_LeftVolume[sample0] + *dest;
         sample1 = MV_RightVolume[sample1] + *(dest + MV_RightChannelOffset / 2);
+#ifndef _XBOX
         if (sample0 < -32768) sample0 = -32768;
         else if (sample0 > 32767) sample0 = 32767;
         if (sample1 < -32768) sample1 = -32768;
         else if (sample1 > 32767) sample1 = 32767;
-        
-        *dest = (short) sample0;
-        *(dest + MV_RightChannelOffset/2) = (short) sample1;
-        
+#endif
+
+        *dest = sample0;
+        *(dest + MV_RightChannelOffset/2) = sample1;
+
         dest += MV_SampleSize / 2;
     }
-    
+
     MV_MixPosition = position;
     MV_MixDestination = (char *) dest;
 }
@@ -155,10 +167,14 @@ void MV_Mix16BitMono16Stereo( unsigned int position, unsigned int rate,
                        char *start, unsigned int length )
 {
     unsigned short *source = (unsigned short *) start;
+#ifdef _XBOX
+    int *dest = (int *) MV_MixDestination;
+#else
     short *dest = (short *) MV_MixDestination;
+#endif
     int sample0l, sample0h, sample0;
     int sample1l, sample1h, sample1;
-    
+
     while (length--) {
         sample0 = source[(position >> 16) << 1];
         sample1 = source[((position >> 16) << 1) + 1];
@@ -174,23 +190,25 @@ void MV_Mix16BitMono16Stereo( unsigned int position, unsigned int rate,
         sample1h = (sample1 >> 8) ^ 128;
 #endif
         position += rate;
-        
+
         sample0l = MV_LeftVolume[sample0l] >> 8;
         sample0h = MV_LeftVolume[sample0h];
         sample0 = sample0l + sample0h + 128;
         sample1l = MV_LeftVolume[sample1l] >> 8;
         sample1h = MV_LeftVolume[sample1h];
         sample1 = sample1l + sample1h + 128;
-        
+
         sample0 = (sample0 + sample1) / 2 + *dest;
+#ifndef _XBOX
         if (sample0 < -32768) sample0 = -32768;
         else if (sample0 > 32767) sample0 = 32767;
-        
-        *dest = (short) sample0;
-        
+#endif
+
+        *dest = sample0;
+
         dest += MV_SampleSize / 2;
     }
-    
+
     MV_MixPosition = position;
     MV_MixDestination = (char *) dest;
 }
@@ -255,10 +273,14 @@ void MV_Mix16BitStereo16Stereo( unsigned int position, unsigned int rate,
                          char *start, unsigned int length )
 {
     unsigned short *source = (unsigned short *) start;
+#ifdef _XBOX
+    int *dest = (int *) MV_MixDestination;
+#else
     short *dest = (short *) MV_MixDestination;
+#endif
     int sample0l, sample0h, sample0;
     int sample1l, sample1h, sample1;
-    
+
     while (length--) {
         sample0 = source[(position >> 16) << 1];
         sample1 = source[((position >> 16) << 1) + 1];
@@ -274,24 +296,26 @@ void MV_Mix16BitStereo16Stereo( unsigned int position, unsigned int rate,
         sample1h = (sample1 >> 8) ^ 128;
 #endif
         position += rate;
-        
+
         sample0l = MV_LeftVolume[sample0l] >> 8;
         sample0h = MV_LeftVolume[sample0h];
         sample1l = MV_RightVolume[sample1l] >> 8;
         sample1h = MV_RightVolume[sample1h];
         sample0 = sample0l + sample0h + 128 + *dest;
         sample1 = sample1l + sample1h + 128 + *(dest + MV_RightChannelOffset/2);
+#ifndef _XBOX
         if (sample0 < -32768) sample0 = -32768;
         else if (sample0 > 32767) sample0 = 32767;
         if (sample1 < -32768) sample1 = -32768;
         else if (sample1 > 32767) sample1 = 32767;
-        
-        *dest = (short) sample0;
-        *(dest + MV_RightChannelOffset/2) = (short) sample1;
-        
+#endif
+
+        *dest = sample0;
+        *(dest + MV_RightChannelOffset/2) = sample1;
+
         dest += MV_SampleSize / 2;
     }
-    
+
     MV_MixPosition = position;
     MV_MixDestination = (char *) dest;
 }

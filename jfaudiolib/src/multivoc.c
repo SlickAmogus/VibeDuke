@@ -88,6 +88,11 @@ static int MV_TotalMemory;
 static int   MV_BufferEmpty[ NumberOfBuffers ];
 char *MV_MixBuffer[ NumberOfBuffers + 1 ];
 
+#ifdef _XBOX
+// 32-bit accumulator buffer for Xbox: eliminates per-voice clipping distortion
+static int MV_Accum32[ MixBufferSize * 2 ];  // stereo int32 pairs
+#endif
+
 static VoiceNode *MV_Voices = NULL;
 
 static volatile VoiceNode VoiceList;
@@ -241,14 +246,22 @@ static void MV_Mix
    length               = MixBufferSize;
    FixedPointBufferSize = voice->FixedPointBufferSize;
 
+   #ifdef _XBOX
+   MV_MixDestination    = (char *) MV_Accum32;
+   #else
    MV_MixDestination    = MV_MixBuffer[ buffer ];
+   #endif
    MV_LeftVolume        = voice->LeftVolume;
    MV_RightVolume       = voice->RightVolume;
 
    if ( ( MV_Channels == 2 ) && ( IS_QUIET( MV_LeftVolume ) ) )
       {
       MV_LeftVolume      = MV_RightVolume;
+      #ifdef _XBOX
+      MV_MixDestination += sizeof(int);  // skip to right channel in int32 buffer
+      #else
       MV_MixDestination += MV_RightChannelOffset;
+      #endif
       }
 
    // Add this voice to the mix
@@ -460,13 +473,27 @@ static void MV_ServiceVoc
    //flags = DisableInterrupts();
 
 #ifdef _XBOX
+   // Widen 16-bit mix buffer to 32-bit accumulator
+   {
+      int i, count = MixBufferSize * MV_Channels;
+      if ( MV_ReverbLevel == 0 )
+         {
+         memset( MV_Accum32, 0, count * sizeof(int) );
+         }
+      else
+         {
+         short *src16 = (short *) MV_MixBuffer[ MV_MixPage ];
+         for ( i = 0; i < count; i++ )
+            MV_Accum32[i] = src16[i];
+         }
+   }
+
    {
       static int svc_count = 0;
       int vcount = 0;
       VoiceNode *v;
       svc_count++;
       for (v = VoiceList.next; v != &VoiceList; v = v->next) vcount++;
-      /* Log voice count for first 10 calls, then every 500th, or when voices > 0 for first 100 */
       if (svc_count <= 10 || (svc_count % 500 == 0) || (vcount > 0 && svc_count <= 100))
          xbox_log("MV_ServiceVoc #%d: voices=%d page=%d\n", svc_count, vcount, MV_MixPage);
    }
@@ -500,6 +527,30 @@ static void MV_ServiceVoc
             }
          }
       }
+
+   #ifdef _XBOX
+   // Convert 32-bit accumulator back to 16-bit with soft limiting.
+   // Above 75% amplitude, compress at 4:1 to reduce explosion/overlap distortion.
+   {
+      int i, count = MixBufferSize * MV_Channels;
+      short *out = (short *) MV_MixBuffer[ MV_MixPage ];
+      for ( i = 0; i < count; i++ )
+         {
+         int s = MV_Accum32[i];
+         if ( s > 24576 )
+            {
+            s = 24576 + ((s - 24576) >> 2);
+            if ( s > 32767 ) s = 32767;
+            }
+         else if ( s < -24576 )
+            {
+            s = -24576 + ((s + 24576) >> 2);
+            if ( s < -32768 ) s = -32768;
+            }
+         out[i] = (short) s;
+         }
+   }
+   #endif
 
    //RestoreInterrupts(flags);
    }
