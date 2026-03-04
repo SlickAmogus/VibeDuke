@@ -6117,6 +6117,183 @@ char cheatquotes[NUMCHEATCODES][14] = {
 
 char cheatbuf[10];
 unsigned char cheatbuflen;
+
+/* ── Xbox Controller Cheat Sequences ─────────────────────────────────────── */
+#ifdef _XBOX
+
+#define XBOX_CHEAT_MAXLEN  16
+#define XBOX_CHEAT_TIMEOUT 360  /* totalclock ticks; 360 = 3 seconds at 120Hz */
+
+typedef struct {
+    int cheatnum;                       /* index for osdcmd_cheatsinfo_stat.cheatnum */
+    int volume, level;                  /* for scotty (cheatnum 2): 0-indexed vol/lev */
+    int length;                         /* number of buttons in sequence */
+    int buttons[XBOX_CHEAT_MAXLEN];     /* each entry is (1 << joybutton_*) */
+} xbox_cheat_def_t;
+
+static const xbox_cheat_def_t xbox_cheat_defs[] = {
+    /* [0] DNCORNHOLIO (god mode): Up Up Down Down Left Right Left Right B A B A */
+    {
+        0, 0,0, 12,
+        {
+            (1 << joybutton_DpadUp),
+            (1 << joybutton_DpadUp),
+            (1 << joybutton_DpadDown),
+            (1 << joybutton_DpadDown),
+            (1 << joybutton_DpadLeft),
+            (1 << joybutton_DpadRight),
+            (1 << joybutton_DpadLeft),
+            (1 << joybutton_DpadRight),
+            (1 << joybutton_B),
+            (1 << joybutton_A),
+            (1 << joybutton_B),
+            (1 << joybutton_A),
+        }
+    },
+    /* [1] DNSTUFF (all weapons/ammo/items/keys): Up Up Down Down Left Right Left Right A B A B */
+    {
+        1, 0,0, 12,
+        {
+            (1 << joybutton_DpadUp),
+            (1 << joybutton_DpadUp),
+            (1 << joybutton_DpadDown),
+            (1 << joybutton_DpadDown),
+            (1 << joybutton_DpadLeft),
+            (1 << joybutton_DpadRight),
+            (1 << joybutton_DpadLeft),
+            (1 << joybutton_DpadRight),
+            (1 << joybutton_A),
+            (1 << joybutton_B),
+            (1 << joybutton_A),
+            (1 << joybutton_B),
+        }
+    },
+    /* [2] DNCLIP (noclip toggle): Up Up Down Down Left Right Left Right A A B B */
+    {
+        20, 0,0, 12,
+        {
+            (1 << joybutton_DpadUp),
+            (1 << joybutton_DpadUp),
+            (1 << joybutton_DpadDown),
+            (1 << joybutton_DpadDown),
+            (1 << joybutton_DpadLeft),
+            (1 << joybutton_DpadRight),
+            (1 << joybutton_DpadLeft),
+            (1 << joybutton_DpadRight),
+            (1 << joybutton_A),
+            (1 << joybutton_A),
+            (1 << joybutton_B),
+            (1 << joybutton_B),
+        }
+    },
+    /* [3] DNSCOTTY309 (warp to E3L9): Up Up Down Down Left Right Left Right B B A A */
+    {
+        2, 2,8, 12,
+        {
+            (1 << joybutton_DpadUp),
+            (1 << joybutton_DpadUp),
+            (1 << joybutton_DpadDown),
+            (1 << joybutton_DpadDown),
+            (1 << joybutton_DpadLeft),
+            (1 << joybutton_DpadRight),
+            (1 << joybutton_DpadLeft),
+            (1 << joybutton_DpadRight),
+            (1 << joybutton_B),
+            (1 << joybutton_B),
+            (1 << joybutton_A),
+            (1 << joybutton_A),
+        }
+    },
+};
+
+#define XBOX_NUM_CHEATS (int)(sizeof(xbox_cheat_defs) / sizeof(xbox_cheat_defs[0]))
+
+static struct {
+    int pos;           /* progress through sequence (0 = not started) */
+    int last_clock;    /* totalclock when last button matched */
+} xbox_cheat_state[sizeof(xbox_cheat_defs) / sizeof(xbox_cheat_defs[0])];
+
+static int xbox_prev_joyb = 0;
+
+static void xbox_cheats(void)
+{
+    int i, just_pressed;
+
+    /* Block if in menu, typing, paused, or demo playback */
+    if ((ps[myconnectindex].gm & MODE_TYPE) || (ps[myconnectindex].gm & MODE_MENU))
+        goto done;
+
+    /* Block on hardest difficulty (Damn I'm Good) */
+    if (ud.player_skill == 4)
+        goto done;
+
+    /* Block in multiplayer or during recording */
+    if (numplayers >= 2 || ud.recstat != 0)
+        goto done;
+
+    /* Edge detection: buttons pressed this frame but not last frame */
+    just_pressed = joyb & ~xbox_prev_joyb;
+    xbox_prev_joyb = joyb;
+
+    if (just_pressed == 0)
+        return;
+
+    /* Check each cheat sequence */
+    for (i = 0; i < XBOX_NUM_CHEATS; i++)
+    {
+        const xbox_cheat_def_t *def = &xbox_cheat_defs[i];
+
+        /* Timeout: reset if too long since last matched button */
+        if (xbox_cheat_state[i].pos > 0 &&
+            (totalclock - xbox_cheat_state[i].last_clock) > XBOX_CHEAT_TIMEOUT)
+        {
+            xbox_cheat_state[i].pos = 0;
+        }
+
+        /* Check if exactly the expected button was just pressed */
+        if (just_pressed == def->buttons[xbox_cheat_state[i].pos])
+        {
+            xbox_cheat_state[i].pos++;
+            xbox_cheat_state[i].last_clock = totalclock;
+
+            if (xbox_cheat_state[i].pos >= def->length)
+            {
+                /* Sequence complete -- activate the cheat */
+                osdcmd_cheatsinfo_stat.cheatnum = def->cheatnum;
+                osdcmd_cheatsinfo_stat.volume = def->volume;
+                osdcmd_cheatsinfo_stat.level = def->level;
+
+                /* Reset all trackers */
+                {
+                    int j;
+                    for (j = 0; j < XBOX_NUM_CHEATS; j++)
+                        xbox_cheat_state[j].pos = 0;
+                }
+                return;
+            }
+        }
+        else
+        {
+            /* Wrong button -- reset progress but check if it restarts this sequence */
+            if (xbox_cheat_state[i].pos > 0)
+            {
+                xbox_cheat_state[i].pos = 0;
+                if (just_pressed == def->buttons[0])
+                {
+                    xbox_cheat_state[i].pos = 1;
+                    xbox_cheat_state[i].last_clock = totalclock;
+                }
+            }
+        }
+    }
+    return;
+
+done:
+    xbox_prev_joyb = joyb;
+}
+
+#endif /* _XBOX */
+
 void cheats(void)
 {
     short ch, i, j, k=0, weapon;
@@ -8493,6 +8670,9 @@ if (!VOLUMEALL) {
         }
 
         cheats();
+#ifdef _XBOX
+        xbox_cheats();
+#endif
         nonsharedkeys();
 
         if( (ud.show_help == 0 && ud.multimode < 2 && !(ps[myconnectindex].gm&MODE_MENU) ) || ud.multimode > 1 || ud.recstat == 2)
