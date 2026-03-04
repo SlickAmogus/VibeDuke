@@ -498,8 +498,9 @@ static void xbox_do_frame_start(void)
 	if (frame_number == 0)
 		xbox_log("Xbox: first frame reset done\n");
 
-	// Per-frame draw stats (log first 60 frames, then every 100th frame)
-	if (frame_number > 0 && (frame_number <= 60 || frame_number % 100 == 0)) {
+	// Per-frame draw stats (log first 60 frames only — periodic logging
+	// causes disk I/O stalls that produce visible hitching every few seconds)
+	if (frame_number > 0 && frame_number <= 60) {
 		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d 2d=%d depthoff=%d tex=%d vbo=%d\n",
 			frame_number - 1, frame_draw_count, frame_skip_count, frame_clip_count,
 			frame_2d_count, frame_depthoff_count,
@@ -1775,8 +1776,10 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 	// pb_busy() only waits for GPU to catch up but does NOT reclaim buffer
 	// space — pb_Put keeps advancing linearly. pb_reset() both waits AND
 	// resets pb_Put back to pb_Head, giving us a fresh 512KB.
-	// Without this, ~1400 draws per frame overflows the buffer silently.
-	if (++draw_since_sync >= 1200) {
+	// Theoretical limit ~1700 draws; threshold provides safety margin.
+	if (++draw_since_sync >= 1500) {
+		xbox_log("Xbox: mid-frame pb_reset at %d draws (frame %d)\n",
+			draw_since_sync, global_frame_num);
 		pb_reset();
 		draw_since_sync = 0;
 	}

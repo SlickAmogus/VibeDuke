@@ -519,15 +519,15 @@ static char * joystickdefaults_xbox[MAXJOYBUTTONS] =
    "Jump",              // A
    "Crouch",            // B
    "Open",              // X
-   "Quick_Kick",        // Y
+   "Inventory",         // Y (use item)
    "Map",               // Back
    "",                  // Guide (no physical button on Xbox OG)
    "Show_Menu",         // Start
-   "Previous_Weapon",   // L stick click
-   "Center_View",       // R stick click
-   "AutoRun",           // White (LeftShoulder)
+   "Quick_Kick",        // L stick click
+   "AutoRun",           // R stick click (toggle run)
+   "Previous_Weapon",   // White (LeftShoulder)
    "Next_Weapon",       // Black (RightShoulder)
-   "Inventory",         // D-pad Up
+   "Jetpack",           // D-pad Up
    "MedKit",            // D-pad Down
    "Inventory_Left",    // D-pad Left
    "Inventory_Right",   // D-pad Right

@@ -1,0 +1,3 @@
+[submodule "nxdk"]
+	path = nxdk
+	url = https://github.com/SlickAmogus/nxdk.git

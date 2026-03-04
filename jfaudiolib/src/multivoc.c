@@ -291,7 +291,42 @@ static void MV_Mix
          }
 
       if (voice->mix) {
-         voice->mix( position, rate, start, voclength );
+#ifdef _XBOX
+         // Fade-in ramp: save accumulator before mixing, then scale this
+         // voice's contribution for the first MV_RAMP_SAMPLES samples.
+         // Eliminates click transients when voices start abruptly.
+         #define MV_RAMP_SAMPLES 64
+         if ( voice->ramp_count < MV_RAMP_SAMPLES )
+            {
+            int *accum = (int *) MV_MixDestination;
+            int ramp_this = MV_RAMP_SAMPLES - voice->ramp_count;
+            int save_count = ( voclength < ramp_this ) ? voclength : ramp_this;
+            int saved[ MV_RAMP_SAMPLES * 2 ];
+            int si;
+
+            // Save accumulator state before this voice mixes in
+            for ( si = 0; si < save_count * 2; si++ )
+               saved[si] = accum[si];
+
+            voice->mix( position, rate, start, voclength );
+
+            // Apply fade-in ramp to this voice's contribution
+            for ( si = 0; si < save_count; si++ )
+               {
+               int fade = ( ( voice->ramp_count + si ) * 256 ) / MV_RAMP_SAMPLES;
+               int dl = accum[ si * 2 ]     - saved[ si * 2 ];
+               int dr = accum[ si * 2 + 1 ] - saved[ si * 2 + 1 ];
+               accum[ si * 2 ]     = saved[ si * 2 ]     + ( dl * fade >> 8 );
+               accum[ si * 2 + 1 ] = saved[ si * 2 + 1 ] + ( dr * fade >> 8 );
+               }
+
+            voice->ramp_count += voclength;
+            }
+         else
+#endif
+            {
+            voice->mix( position, rate, start, voclength );
+            }
       }
 
       voice->position = MV_MixPosition;
@@ -331,6 +366,9 @@ void MV_PlayVoice
    int flags;
 
    flags = DisableInterrupts();
+#ifdef _XBOX
+   voice->ramp_count = 0;
+#endif
    LL_SortedInsertion( &VoiceList, voice, prev, next, VoiceNode, priority );
 
    RestoreInterrupts( flags );
@@ -529,23 +567,29 @@ static void MV_ServiceVoc
       }
 
    #ifdef _XBOX
-   // Convert 32-bit accumulator back to 16-bit with soft limiting.
-   // Above 75% amplitude, compress at 4:1 to reduce explosion/overlap distortion.
+   // Convert 32-bit accumulator back to 16-bit with smooth soft limiting.
+   // Uses a rational curve above the threshold: no hard knee, derivative is
+   // continuous at the transition.  output = T + R*over/(over+R) where
+   // T=20000 (threshold), R=12767 (headroom to 32767), over=abs(s)-T.
+   // At threshold: gain=1.0 (smooth).  Asymptotically approaches +-32767.
    {
       int i, count = MixBufferSize * MV_Channels;
       short *out = (short *) MV_MixBuffer[ MV_MixPage ];
       for ( i = 0; i < count; i++ )
          {
-         int s = MV_Accum32[i];
-         if ( s > 24576 )
+         // Halve the accumulated signal to prevent the limiter from engaging
+         // during normal gameplay.  Keeps multi-voice mixes in the linear
+         // region; compensate with TV/system volume.
+         int s = MV_Accum32[i] >> 1;
+         if ( s > 20000 )
             {
-            s = 24576 + ((s - 24576) >> 2);
-            if ( s > 32767 ) s = 32767;
+            int over = s - 20000;
+            s = 20000 + (int)((long long)over * 12767 / (over + 12767));
             }
-         else if ( s < -24576 )
+         else if ( s < -20000 )
             {
-            s = -24576 + ((s + 24576) >> 2);
-            if ( s < -32768 ) s = -32768;
+            int over = -s - 20000;
+            s = -(20000 + (int)((long long)over * 12767 / (over + 12767)));
             }
          out[i] = (short) s;
          }

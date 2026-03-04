@@ -223,7 +223,7 @@ void CONFIG_SetXboxJoystickTuning(void)
         CONTROL_SetJoyAxisDead(i, JoystickAnalogueDead[i]);
         CONTROL_SetJoyAxisSaturate(i, JoystickAnalogueSaturate[i]);
     }
-    RunMode = 0;
+    RunMode = 1;
     ud.mouseflip = 1;
 }
 #endif
@@ -255,13 +255,13 @@ void CONFIG_SetDefaults( void )
     ud.mouseflip = 0;
     ud.runkey_mode = 0;
     ud.statusbarscale = 8;
-    ud.screen_size = 8;
+    ud.screen_size = 4;
     ud.screen_tilting = 1;
     ud.shadows = 1;
     ud.detail = 1;
     ud.lockout = 0;
     ud.pwlockout[0] = '\0';
-    ud.crosshair = 0;
+    ud.crosshair = 1;
     ud.m_marker = 1;
     ud.m_ffire = 1;
     ud.levelstats = 0;

@@ -149,6 +149,10 @@ typedef struct VoiceNode
 
    unsigned int  callbackval;
 
+#ifdef _XBOX
+   int           ramp_count;    // samples played so far (for fade-in ramp)
+#endif
+
    } VoiceNode;
 
 typedef struct
