@@ -1,5 +1,5 @@
 XBE_TITLE = VibeDuke3D
-NXDK_DIR  ?= /c/Claude/nxdk
+NXDK_DIR  ?= $(CURDIR)/nxdk
 NXDK_SDL  = y
 
 # Ensure NXDK_DIR is exported to all subprocess invocations (nxdk-cc needs it)
@@ -32,7 +32,6 @@ NXDK_CFLAGS += -I$(CURDIR)/$(AUDIOROOT)/third-party/mingw/include
 
 # Include paths — must be in NXDK_CFLAGS (not CFLAGS) so they come BEFORE
 # nxdk's NXDK_CFLAGS additions (e.g. zlib adds its dir which has its own crc32.h)
-NXDK_CFLAGS += -I$(CURDIR)/xbox_compat
 NXDK_CFLAGS += -I$(CURDIR)/$(GAMESRC)
 NXDK_CFLAGS += -I$(CURDIR)/$(ENGINEINC)
 NXDK_CFLAGS += -I$(CURDIR)/$(ENGINESRC)
@@ -52,14 +51,17 @@ NXDK_CFLAGS += -isystem $(NXDK_DIR)/lib/pdclib/include
 NXDK_CFLAGS += -I$(NXDK_DIR)/lib/pdclib/platform/xbox/include
 NXDK_CFLAGS += -I$(NXDK_DIR)/lib/xboxrt/vcruntime
 
-# Force-include our Xbox compatibility shims before any other header
-NXDK_CFLAGS += -include $(CURDIR)/xbox_compat/xbox_defs.h
-
-# Suppress noisy warnings from the old codebase
+# Suppress noisy warnings from the old codebase (harmless globally)
 NXDK_CFLAGS += -Wno-implicit-function-declaration
 NXDK_CFLAGS += -Wno-implicit-int
 NXDK_CFLAGS += -Wno-parentheses
 NXDK_CFLAGS += -Wno-dangling-else
+
+# Project-specific flags — applied only to our source files (not nxdk libs)
+# via target-specific variable assignment below.  The -include and -I for
+# xbox_compat must NOT leak into nxdk's own pdclib/xboxrt builds.
+DUKE_CFLAGS  = -I$(CURDIR)/xbox_compat
+DUKE_CFLAGS += -include $(CURDIR)/xbox_compat/xbox_defs.h
 
 # --- Engine sources ---------------------------------------------------------
 ENGINE_SRCS = \
@@ -143,6 +145,10 @@ COMPAT_SRCS = \
 	$(CURDIR)/xbox_compat/xbox_startup.c
 
 SRCS = $(COMPAT_SRCS) $(ENGINE_SRCS) $(GAME_SRCS) $(MACT_SRCS) $(AUDIO_SRCS)
+
+# Apply project-specific flags only to our object files (not nxdk libs)
+DUKE_OBJS = $(addsuffix .obj, $(basename $(SRCS)))
+$(DUKE_OBJS): CFLAGS += $(DUKE_CFLAGS)
 
 # --- Cg shaders (compiled to .inl by nxdk toolchain) -----------------------
 SHADER_OBJS = polymost_vs.inl polymost_ps.inl

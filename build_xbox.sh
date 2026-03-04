@@ -5,7 +5,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-export NXDK_DIR=/c/Claude/nxdk
+export NXDK_DIR="$SCRIPT_DIR/nxdk"
 export PATH="${NXDK_DIR}/bin:$PATH"
 
 # Prevent MSVC/Windows SDK include paths from leaking into nxdk-cc.
@@ -56,5 +56,8 @@ compile_if_stale() {
 
 compile_if_stale xbox_compat/xbox_startup.c xbox_compat/xbox_startup.obj
 compile_if_stale xbox_compat/posix_io.c     xbox_compat/posix_io.obj
+
+# Clean all .obj files to force full recompile (headers aren't tracked as deps)
+find src jfbuild/src jfmact jfaudiolib/src -name '*.obj' -delete 2>/dev/null || true
 
 /c/msys64/usr/bin/make.exe -f Makefile.nxdk "$@" 2>&1
