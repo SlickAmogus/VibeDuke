@@ -42,6 +42,12 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "assmisc.h"
 #include "_multivc.h"
 
+#ifdef _XBOX_APU
+#include <hal/apu.h>
+static int MV_ApuInitialized = 0;
+int MV_ApuActive = 0;  // Global: 1 if APU hardware mixing is active
+#endif
+
 #define RoundFixed( fixedval, bits )            \
         (                                       \
           (                                     \
@@ -243,6 +249,46 @@ static void MV_Mix
       return;
       }
 
+#ifdef _XBOX_APU
+   // Deferred APU voice start: now that GetSound has parsed the format
+   // header, voice->sound points to real PCM data with valid length.
+   if ( MV_ApuInitialized && voice->apu_voice >= 0 && !voice->apu_started )
+      {
+      // Total sample frames in this block
+      unsigned int total_frames = ( voice->length >> 16 ) + voice->BlockLength;
+      unsigned int total_bytes = total_frames * voice->channels * ( voice->bits / 8 );
+      int loop = ( voice->LoopStart != NULL ) ? 1 : 0;
+      int left_vol = 255, right_vol = 255;
+
+      if ( !IS_QUIET( voice->LeftVolume ) )
+         {
+         int idx = (int)( voice->LeftVolume - MV_VolumeTable[0] ) / 256;
+         left_vol = idx * 255 / MV_MaxVolume;
+         }
+      else
+         {
+         left_vol = 0;
+         }
+      if ( !IS_QUIET( voice->RightVolume ) )
+         {
+         int idx = (int)( voice->RightVolume - MV_VolumeTable[0] ) / 256;
+         right_vol = idx * 255 / MV_MaxVolume;
+         }
+      else
+         {
+         right_vol = 0;
+         }
+
+      if ( total_bytes > 0 && voice->sound != NULL )
+         {
+         XApuVoicePlay( voice->apu_voice, voice->sound, total_bytes,
+            voice->SamplingRate, voice->bits, voice->channels, loop,
+            left_vol, right_vol );
+         }
+      voice->apu_started = 1;
+      }
+#endif
+
    length               = MixBufferSize;
    FixedPointBufferSize = voice->FixedPointBufferSize;
 
@@ -290,6 +336,17 @@ static void MV_Mix
          voclength = length;
          }
 
+
+#ifdef _XBOX_APU_MIXBUF_WORKING
+      // DISABLED: VP doesn't write to GP XMEM MIXBUF on real hardware.
+      // MIXBUF values are stale kernel residual, producing a constant ringing tone.
+      // Re-enable this when VP→MIXBUF pipeline is confirmed working.
+      if ( MV_ApuInitialized && voice->apu_voice >= 0 && voice->apu_started )
+         {
+         MV_MixPosition = position + rate * voclength;
+         }
+      else
+#endif
       if (voice->mix) {
 #ifdef _XBOX
          // Fade-in ramp: save accumulator before mixing, then scale this
@@ -369,6 +426,18 @@ void MV_PlayVoice
 #ifdef _XBOX
    voice->ramp_count = 0;
 #endif
+
+#ifdef _XBOX_APU
+   // Mark APU voice as pending start — actual XApuVoicePlay is deferred
+   // to MV_ServiceVoc after GetSound() has parsed the format header and
+   // populated voice->sound with real PCM data. (VOC files set BlockLength=0
+   // here; actual data isn't available until MV_GetNextVOCBlock runs.)
+   if ( MV_ApuInitialized && voice->apu_voice >= 0 )
+      {
+      voice->apu_started = 0;
+      }
+#endif
+
    LL_SortedInsertion( &VoiceList, voice, prev, next, VoiceNode, priority );
 
    RestoreInterrupts( flags );
@@ -390,6 +459,16 @@ static void MV_StopVoice
    int flags;
 
    flags = DisableInterrupts();
+
+#ifdef _XBOX_APU
+   if ( MV_ApuInitialized && voice->apu_voice >= 0 )
+      {
+      XApuVoiceStop( voice->apu_voice );
+      XApuVoiceFree( voice->apu_voice );
+      voice->apu_voice = -1;
+      voice->apu_started = 0;
+      }
+#endif
 
    // move the voice from the play list to the free list
    LL_Remove( voice, next, prev );
@@ -537,6 +616,23 @@ static void MV_ServiceVoc
    }
 #endif
 
+#ifdef _XBOX_APU
+   // Periodic APU diagnostic dump (every ~10 seconds at ~94 calls/sec)
+   {
+      static int apu_diag_count = 0;
+      apu_diag_count++;
+      if (apu_diag_count == 1 || apu_diag_count == 50 || apu_diag_count == 500
+          || (apu_diag_count % 3000 == 0))
+         {
+         char diag[16384];
+         int diag_len = XApuDiagnostic(diag, sizeof(diag));
+         xbox_log("=== APU DIAG #%d ===\n", apu_diag_count);
+         extern void xbox_log_write(const char *, int);
+         xbox_log_write(diag, diag_len);
+         }
+   }
+#endif
+
    for( voice = VoiceList.next; voice != &VoiceList; voice = next )
       {
       if ( voice->Paused )
@@ -547,6 +643,11 @@ static void MV_ServiceVoc
 
       MV_BufferEmpty[ MV_MixPage ] = FALSE;
 
+#ifdef _XBOX_APU
+      // Skip software mix when APU hardware mixing is active.
+      // VP voices are configured in MV_PlayVoice → XApuVoicePlay.
+      if ( !MV_ApuInitialized )
+#endif
       MV_MixFunction( voice, MV_MixPage );
 
       next = voice->next;
@@ -595,6 +696,25 @@ static void MV_ServiceVoc
          }
    }
    #endif
+
+#ifdef _XBOX_APU
+   // Read VP MIXBUF output and write directly to the mix buffer.
+   // When software mix is disabled above, this is the ONLY audio source.
+   if ( MV_ApuInitialized )
+      {
+      int num_samples = MixBufferSize;
+      short *out = (short *) MV_MixBuffer[ MV_MixPage ];
+      short apu_buf[ MixBufferSize * 2 ];  // stereo
+      XApuPumpMixbuf( apu_buf, num_samples );
+      for ( int i = 0; i < num_samples * MV_Channels; i++ )
+         {
+         int mixed = (int)out[i] + (int)apu_buf[i];
+         if ( mixed > 32767 ) mixed = 32767;
+         else if ( mixed < -32768 ) mixed = -32768;
+         out[i] = (short)mixed;
+         }
+      }
+#endif
 
    //RestoreInterrupts(flags);
    }
@@ -1352,6 +1472,16 @@ VoiceNode *MV_AllocVoice
 
    voice->handle = MV_VoiceHandle;
 
+#ifdef _XBOX_APU
+   // Try to allocate an APU hardware voice
+   voice->apu_voice = -1;
+   voice->apu_started = 0;
+   if ( MV_ApuInitialized )
+      {
+      voice->apu_voice = XApuVoiceAlloc();
+      }
+#endif
+
    return( voice );
    }
 
@@ -1422,6 +1552,16 @@ static void MV_SetVoicePitch
    // Multiply by MixBufferSize - 1
    voice->FixedPointBufferSize = ( voice->RateScale * MixBufferSize ) -
       voice->RateScale;
+
+#ifdef _XBOX_APU
+   if ( MV_ApuInitialized && voice->apu_voice >= 0 )
+      {
+      // Effective rate after pitch offset
+      unsigned int effective_rate = ( rate * voice->PitchScale ) >> 16;
+      if ( effective_rate == 0 ) effective_rate = rate;
+      XApuVoiceSetPitch( voice->apu_voice, effective_rate );
+      }
+#endif
    }
 
 
@@ -1772,6 +1912,15 @@ void MV_SetVoiceVolume
       voice->LeftVolume  = MV_GetVolumeTable( left );
       voice->RightVolume = MV_GetVolumeTable( right );
       }
+
+#ifdef _XBOX_APU
+   if ( MV_ApuInitialized && voice->apu_voice >= 0 )
+      {
+      int lv = left, rv = right;
+      if ( MV_SwapLeftRight ) { lv = right; rv = left; }
+      XApuVoiceSetVolume( voice->apu_voice, lv, rv );
+      }
+#endif
 
    MV_SetVoiceMixMode( voice );
    }
@@ -3051,6 +3200,10 @@ int MV_Init
 
    for( index = 0; index < Voices; index++ )
       {
+#ifdef _XBOX_APU
+      MV_Voices[ index ].apu_voice = -1;
+      MV_Voices[ index ].apu_started = 0;
+#endif
       LL_Add( (VoiceNode*) &VoicePool, &MV_Voices[ index ], next, prev );
       }
 
@@ -3115,6 +3268,15 @@ int MV_Init
       return( MV_Error );
       }
 
+#ifdef _XBOX_APU
+   // Initialize APU Voice Processor for hardware mixing
+   if ( XApuInit() == 0 )
+      {
+      MV_ApuInitialized = 1;
+      MV_ApuActive = 1;
+      }
+#endif
+
    return( MV_Ok );
    }
 
@@ -3139,6 +3301,15 @@ int MV_Shutdown
       }
 
    MV_KillAllVoices();
+
+#ifdef _XBOX_APU
+   if ( MV_ApuInitialized )
+      {
+      XApuShutdown();
+      MV_ApuInitialized = 0;
+      MV_ApuActive = 0;
+      }
+#endif
 
    MV_Installed = FALSE;
 

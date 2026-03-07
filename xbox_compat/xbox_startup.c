@@ -47,6 +47,16 @@ void xbox_log(const char *fmt, ...)
         _write(xbox_log_fd, buf, (unsigned)len);
 }
 
+/* Write a raw pre-formatted string directly to the log file.
+ * Bypasses the 512-byte vsnprintf buffer in xbox_log(). */
+void xbox_log_write(const char *str, int len)
+{
+    if (len <= 0) return;
+    OutputDebugStringA(str);
+    if (xbox_log_fd >= 0)
+        _write(xbox_log_fd, str, (unsigned)len);
+}
+
 /* atexit handler: stop audio DMA and pause hardware before the quick-reboot
  * that nxdk's exit() triggers.  This gives the next app launch a cleaner
  * starting state. */

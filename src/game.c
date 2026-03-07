@@ -2670,6 +2670,15 @@ void displayrest(int smoothratio)
     if( ud.pause_on==1 && (ps[myconnectindex].gm&MODE_MENU) == 0 )
         menutext(160,100,0,0,"GAME PAUSED");
 
+#if 0 // APU debug text disabled
+#ifdef _XBOX_APU
+    {
+        extern int MV_ApuActive;
+        minitext(1, 100, MV_ApuActive ? "SW+APU" : "SOFTWARE", 0, 2+8+16);
+    }
+#endif
+#endif
+
     if(ud.coords)
         coords(screenpeek);
     if(ud.tickrate)

@@ -152,6 +152,10 @@ typedef struct VoiceNode
 #ifdef _XBOX
    int           ramp_count;    // samples played so far (for fade-in ramp)
 #endif
+#ifdef _XBOX_APU
+   int           apu_voice;     // APU VP voice handle (-1 = not using APU)
+   int           apu_started;   // 1 = XApuVoicePlay called, 0 = pending
+#endif
 
    } VoiceNode;
 

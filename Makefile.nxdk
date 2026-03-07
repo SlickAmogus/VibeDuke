@@ -26,6 +26,9 @@ NXDK_CFLAGS += -DUSE_ASM=0
 # Audio: SDL driver only (no DirectSound / XAudio2 / WinMM)
 NXDK_CFLAGS += -DHAVE_SDL
 
+# APU Voice Processor: hardware mixing (zero CPU cost)
+NXDK_CFLAGS += -D_XBOX_APU=1
+
 # OGG Vorbis music support
 NXDK_CFLAGS += -DHAVE_VORBIS
 NXDK_CFLAGS += -I$(CURDIR)/$(AUDIOROOT)/third-party/mingw/include
