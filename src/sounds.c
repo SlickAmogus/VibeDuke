@@ -89,8 +89,6 @@ void SoundStartup( void )
 	  sprintf(buf, "Sound startup error: %s", FX_ErrorString( FX_Error ));
 	  gameexit(buf);
    }
-	
-	FXDevice = 0;
 }
 
 /*
