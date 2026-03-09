@@ -4777,6 +4777,12 @@ void playanm(const char *fn,char t)
         else if(t == 6) first4animsounds(i);
         else if(t == 5) logoanimsounds(i);
         else if(t < 4) endanimsounds(i);
+
+#ifdef _XBOX
+        /* Ensure audio pump runs every frame even when the frame-wait loop
+         * is skipped (frames render faster than the 120Hz timer tick). */
+        handleevents();
+#endif
     }
 
     ENDOFANIMLOOP:

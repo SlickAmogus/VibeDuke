@@ -493,6 +493,15 @@ void XboxDS_FlushBuffer(void)
         memset(ptr1, 0, bytes1);
         IDirectSoundBuffer_Unlock(pDSBuf, ptr1, bytes1, NULL, 0);
     }
+
+    /* Sync our write cursor to the current play position so PumpAudio
+     * doesn't bulk-fill the buffer with silence before new sounds trigger. */
+    {
+        DWORD playPos;
+        if (SUCCEEDED(IDirectSoundBuffer_GetCurrentPosition(pDSBuf, &playPos, NULL))) {
+            DSWriteCursor = playPos;
+        }
+    }
 }
 
 /* ---- Public pump function (called from game loop) ----------------------- */
