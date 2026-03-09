@@ -977,6 +977,12 @@ int FX_StopAllSounds
       return( FX_Warning );
       }
 
+#ifdef _XBOX
+   /* Flush DirectSound buffer so stale PCM doesn't replay during
+    * scene transitions (stats→level, menu→game, animation→menu). */
+   { extern void XboxDS_FlushBuffer(void); XboxDS_FlushBuffer(); }
+#endif
+
    return( FX_Ok );
    }
 

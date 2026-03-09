@@ -447,8 +447,23 @@ void XboxDSDrv_PCM_StopPlayback(void)
 
     if (pDSBuf) {
         IDirectSoundBuffer_Stop(pDSBuf);
+
+        /* Flush DS buffer with silence so stale PCM doesn't replay on next
+         * scene transition (stats→level, menu→game, animation→menu). */
+        {
+            LPVOID ptr1;
+            DWORD bytes1;
+            HRESULT hr = IDirectSoundBuffer_Lock(pDSBuf, 0, DS_BUFFER_SIZE,
+                &ptr1, &bytes1, NULL, NULL, DSBLOCK_ENTIREBUFFER);
+            if (SUCCEEDED(hr)) {
+                memset(ptr1, 0, bytes1);
+                IDirectSoundBuffer_Unlock(pDSBuf, ptr1, bytes1, NULL, 0);
+            }
+        }
+        IDirectSoundBuffer_SetCurrentPosition(pDSBuf, 0);
     }
 
+    DSWriteCursor = 0;
     Playing = 0;
 }
 
@@ -460,6 +475,24 @@ void XboxDSDrv_PCM_Lock(void)
 void XboxDSDrv_PCM_Unlock(void)
 {
     RtlLeaveCriticalSection(&DSLock);
+}
+
+/* Flush the DS buffer with silence.  Called when FX_StopAllSounds() runs
+ * during scene transitions so stale PCM doesn't replay. */
+void XboxDS_FlushBuffer(void)
+{
+    LPVOID ptr1;
+    DWORD bytes1;
+    HRESULT hr;
+
+    if (!Initialised || !pDSBuf) return;
+
+    hr = IDirectSoundBuffer_Lock(pDSBuf, 0, DS_BUFFER_SIZE,
+        &ptr1, &bytes1, NULL, NULL, DSBLOCK_ENTIREBUFFER);
+    if (SUCCEEDED(hr)) {
+        memset(ptr1, 0, bytes1);
+        IDirectSoundBuffer_Unlock(pDSBuf, ptr1, bytes1, NULL, 0);
+    }
 }
 
 /* ---- Public pump function (called from game loop) ----------------------- */
