@@ -35,6 +35,10 @@
 # include "driver_sdl.h"
 #endif
 
+#ifdef _XBOX
+# include "driver_dsound_xbox.h"
+#endif
+
 #if defined __APPLE__ && !defined NO_COREAUDIO
 # include "driver_coreaudio.h"
 #endif
@@ -163,10 +167,21 @@ static struct {
     #endif
     },
 
-    // Windows DirectSound
+    // Windows DirectSound (or Xbox DirectSound via RXDK)
     {
         "DirectSound",
-    #if defined _WIN32 && !defined NO_DIRECTSOUND
+    #if defined _XBOX
+        XboxDSDrv_GetError,
+        XboxDSDrv_ErrorString,
+        XboxDSDrv_PCM_Init,
+        XboxDSDrv_PCM_Shutdown,
+        XboxDSDrv_PCM_BeginPlayback,
+        XboxDSDrv_PCM_StopPlayback,
+        XboxDSDrv_PCM_Lock,
+        XboxDSDrv_PCM_Unlock,
+        UNSUPPORTED_CD,
+        UNSUPPORTED_MIDI,
+    #elif defined _WIN32 && !defined NO_DIRECTSOUND
         DirectSoundDrv_GetError,
         DirectSoundDrv_ErrorString,
         DirectSoundDrv_PCM_Init,

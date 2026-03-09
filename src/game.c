@@ -8491,11 +8491,11 @@ int app_main(int argc, char const * const argv[])
 
         buildprintf("Checking sound inits.\n");
 #ifdef _XBOX
-        /* Force SDL for PCM sound effects (skip DirectSound/WinMM stub failures).
-         * ASS_SDL = 7; FX_Init uses (FXDevice - 1) when FXDevice > 0.
-         * Music uses autodetect — SDL has no MIDI support so it falls back
-         * to NoSound (silent music) without crashing. */
-        FXDevice    = ASS_SDL + 1;
+        /* Use Xbox DirectSound for PCM sound effects.
+         * ASS_DirectSound = 3; FX_Init uses (FXDevice - 1) when FXDevice > 0.
+         * This routes audio through the full VP→GP→EP→AC97 pipeline via
+         * RXDK's dsound.lib for proper hardware audio including optical 5.1. */
+        FXDevice    = ASS_DirectSound + 1;
         MusicDevice = 0;  /* ASS_AutoDetect — falls back to NoSound gracefully */
 
         /* Re-assert AV encoder configuration before audio init.
@@ -8513,6 +8513,12 @@ int app_main(int argc, char const * const argv[])
         }
 
         xbox_log("DUKE3D: SoundStartup FXDevice=%d MusicDevice=%d\n", FXDevice, MusicDevice);
+
+        /* Show loading screen while DirectSound initializes the APU pipeline.
+         * DirectSoundCreate programs VP/GP/EP which takes a moment. */
+        clearallviews(0L);
+        menutext(160,105,0,0,"LOADING...");
+        nextpage();
 #endif
         SoundStartup();
 #ifdef _XBOX

@@ -1657,6 +1657,10 @@ static void loadappicon(void)
 int handleevents(void)
 {
 #ifdef _XBOX
+	/* Pump DirectSound audio every frame — must be called from every game loop
+	 * (menus, gameplay, loading, demos) or the VP→GP→EP pipeline stalls. */
+	{ extern void XboxDS_Pump(void); XboxDS_Pump(); }
+
 	/* Yield CPU briefly so the SDL audio thread can run.
 	 * On single-core Xbox (and xemu), the audio callback thread may
 	 * starve if the main thread never sleeps.

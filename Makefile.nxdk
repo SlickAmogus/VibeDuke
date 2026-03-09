@@ -23,11 +23,10 @@ NXDK_CFLAGS += -DUSE_POLYMOST=1
 NXDK_CFLAGS += -DUSE_OPENGL=2
 NXDK_CFLAGS += -DUSE_ASM=0
 
-# Audio: SDL driver only (no DirectSound / XAudio2 / WinMM)
+# Audio: SDL driver kept for compatibility; Xbox DirectSound via RXDK for output
 NXDK_CFLAGS += -DHAVE_SDL
 
-# APU Voice Processor: hardware mixing (zero CPU cost)
-NXDK_CFLAGS += -D_XBOX_APU=1
+# RXDK DirectSound headers + objects live in xbox_compat/ (self-contained)
 
 # OGG Vorbis music support
 NXDK_CFLAGS += -DHAVE_VORBIS
@@ -126,7 +125,7 @@ MACT_SRCS = \
 	$(CURDIR)/$(MACTROOT)/scriplib.c \
 	$(CURDIR)/$(MACTROOT)/animlib.c
 
-# --- Audio library (SDL backend, no Windows-only drivers) -------------------
+# --- Audio library (SDL + Xbox DirectSound via RXDK) ------------------------
 AUDIO_SRCS = \
 	$(CURDIR)/$(AUDIOROOT)/src/drivers.c \
 	$(CURDIR)/$(AUDIOROOT)/src/fx_man.c \
@@ -139,19 +138,29 @@ AUDIO_SRCS = \
 	$(CURDIR)/$(AUDIOROOT)/src/midi.c \
 	$(CURDIR)/$(AUDIOROOT)/src/driver_nosound.c \
 	$(CURDIR)/$(AUDIOROOT)/src/driver_sdl.c \
+	$(CURDIR)/$(AUDIOROOT)/src/driver_dsound_xbox.c \
 	$(CURDIR)/$(AUDIOROOT)/src/asssys.c \
 	$(CURDIR)/$(AUDIOROOT)/src/vorbis.c
 
 COMPAT_SRCS = \
 	$(CURDIR)/xbox_compat/posix_io.c \
 	$(CURDIR)/xbox_compat/xbox_stubs.c \
-	$(CURDIR)/xbox_compat/xbox_startup.c
+	$(CURDIR)/xbox_compat/xbox_startup.c \
+	$(CURDIR)/xbox_compat/dsound_bridge.c \
+	$(CURDIR)/xbox_compat/msvc_compat.c
 
 SRCS = $(COMPAT_SRCS) $(ENGINE_SRCS) $(GAME_SRCS) $(MACT_SRCS) $(AUDIO_SRCS)
 
 # Apply project-specific flags only to our object files (not nxdk libs)
 DUKE_OBJS = $(addsuffix .obj, $(basename $(SRCS)))
 $(DUKE_OBJS): CFLAGS += $(DUKE_CFLAGS)
+
+# RXDK DirectSound headers — applied ONLY to the dsound driver file.
+# The rxdk_include/ dir has ONLY dsound.h/dsfxparm.h/packing headers
+# (no conflicting CRT headers). Our xtl.h shim in xbox_compat/
+# (found first via DUKE_CFLAGS -I) overrides RXDK's xtl.h.
+DSOUND_CFLAGS = -I$(CURDIR)/xbox_compat/rxdk_include
+$(CURDIR)/$(AUDIOROOT)/src/driver_dsound_xbox.obj: CFLAGS += $(DSOUND_CFLAGS)
 
 # --- Cg shaders (compiled to .inl by nxdk toolchain) -----------------------
 SHADER_OBJS = polymost_vs.inl polymost_ps.inl
@@ -162,5 +171,34 @@ NXDK_CFLAGS += -I$(CURDIR)
 # OGG Vorbis: using stb_vorbis (included in vorbis.c), no external libs needed
 # /safeseh:no kept for any remaining mingw-style .o objects
 NXDK_LDFLAGS += /safeseh:no
+
+# RXDK DirectSound — extracted .obj files (debug sections stripped).
+# lld 18.1.8 crashes on old MSVC .debug$F sections, so we use llvm-objcopy
+# stripped copies.  MSVC runtime stubs (__ftol2 etc.) are in msvc_compat.c.
+DSOUND_OBJS_DIR = $(CURDIR)/xbox_compat/dsound_objs
+DSOUND_OBJS = \
+	$(DSOUND_OBJS_DIR)/dsapi.obj \
+	$(DSOUND_OBJS_DIR)/globals.obj \
+	$(DSOUND_OBJS_DIR)/mcpxcore.obj \
+	$(DSOUND_OBJS_DIR)/mcpvoice.obj \
+	$(DSOUND_OBJS_DIR)/mcpstrm.obj \
+	$(DSOUND_OBJS_DIR)/mcpbuf.obj \
+	$(DSOUND_OBJS_DIR)/mcpapu.obj \
+	$(DSOUND_OBJS_DIR)/gpdsp.obj \
+	$(DSOUND_OBJS_DIR)/epdsp.obj \
+	$(DSOUND_OBJS_DIR)/dspdma.obj \
+	$(DSOUND_OBJS_DIR)/dsmath.obj \
+	$(DSOUND_OBJS_DIR)/dscommon.obj \
+	$(DSOUND_OBJS_DIR)/heap.obj \
+	$(DSOUND_OBJS_DIR)/ac97.obj \
+	$(DSOUND_OBJS_DIR)/dsperf.obj \
+	$(DSOUND_OBJS_DIR)/dsoundi.obj \
+	$(DSOUND_OBJS_DIR)/hrtf.obj \
+	$(DSOUND_OBJS_DIR)/i3dl2.obj \
+	$(DSOUND_OBJS_DIR)/cipher.obj \
+	$(DSOUND_OBJS_DIR)/ac97xmo.obj \
+	$(DSOUND_OBJS_DIR)/wavexmo.obj \
+	$(DSOUND_OBJS_DIR)/wavfileio.obj
+NXDK_LDFLAGS += $(DSOUND_OBJS)
 
 include $(NXDK_DIR)/Makefile
