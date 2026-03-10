@@ -284,25 +284,40 @@ int XboxDSDrv_PCM_Init(int *mixrate, int *numchannels, int *samplebits, void *in
     wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
     wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
 
-    /* Create sound buffer */
-    memset(&dsbd, 0, sizeof(dsbd));
-    dsbd.dwSize = sizeof(dsbd);
-    dsbd.dwFlags = 0; /* Default 2D buffer */
-    dsbd.dwBufferBytes = DS_BUFFER_SIZE;
-    dsbd.lpwfxFormat = &wfx;
-    dsbd.lpMixBins = NULL; /* Use default stereo mixbins */
-    dsbd.dwInputMixBin = 0;
+    /* Create sound buffer — explicitly route to FL/FR only to prevent
+     * any default RXDK routing that might include surround channels.
+     * NOTE: frontPairs/frontBins must stay in scope through CreateSoundBuffer
+     * since dsbd.lpMixBins holds a pointer to them. */
+    {
+        DSMIXBINVOLUMEPAIR frontPairs[2];
+        DSMIXBINS frontBins;
 
-    hr = IDirectSound_CreateSoundBuffer(pDS, &dsbd, &pDSBuf, NULL);
-    if (FAILED(hr)) {
-        xbox_log("XboxDS: CreateSoundBuffer FAILED hr=0x%08X\n", (unsigned)hr);
-        IDirectSound_Release(pDS);
-        pDS = NULL;
-        ErrorCode = XDS_Err_CreateBuffer;
-        return XDS_Err_Error;
+        frontPairs[0].dwMixBin = DSMIXBIN_FRONT_LEFT;
+        frontPairs[0].lVolume  = 0;
+        frontPairs[1].dwMixBin = DSMIXBIN_FRONT_RIGHT;
+        frontPairs[1].lVolume  = 0;
+        frontBins.dwMixBinCount = 2;
+        frontBins.lpMixBinVolumePairs = frontPairs;
+
+        memset(&dsbd, 0, sizeof(dsbd));
+        dsbd.dwSize = sizeof(dsbd);
+        dsbd.dwFlags = 0; /* 2D buffer */
+        dsbd.dwBufferBytes = DS_BUFFER_SIZE;
+        dsbd.lpwfxFormat = &wfx;
+        dsbd.lpMixBins = &frontBins;
+        dsbd.dwInputMixBin = 0;
+
+        hr = IDirectSound_CreateSoundBuffer(pDS, &dsbd, &pDSBuf, NULL);
+        if (FAILED(hr)) {
+            xbox_log("XboxDS: CreateSoundBuffer FAILED hr=0x%08X\n", (unsigned)hr);
+            IDirectSound_Release(pDS);
+            pDS = NULL;
+            ErrorCode = XDS_Err_CreateBuffer;
+            return XDS_Err_Error;
+        }
+        xbox_log("XboxDS: CreateSoundBuffer OK pBuf=%p size=%d\n",
+            (void *)pDSBuf, DS_BUFFER_SIZE);
     }
-    xbox_log("XboxDS: CreateSoundBuffer OK pBuf=%p size=%d\n",
-        (void *)pDSBuf, DS_BUFFER_SIZE);
 
     /* Create Center/LFE and Surround buffers with custom mixbin routing */
     {
