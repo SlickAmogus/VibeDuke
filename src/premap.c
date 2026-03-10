@@ -456,60 +456,53 @@ static void xbox_preload_tiles(void)
     unsigned int t0 = getticks();
 
     /*
-     * ---- ADD YOUR TILE PRELOADS BELOW THIS LINE ----
+     * ---- TILE PRELOADS ----
      *
-     * Format:
-     *   PRELOAD_TILE(TILENUMBER)         — single tile
-     *   PRELOAD_RANGE(START, COUNT)      — range of COUNT tiles from START
+     * Uncomment lines to preload. Names come from names.h (included via duke3d.h).
+     * Use PRELOAD_TILE(NAME) for a single tile, PRELOAD_RANGE(NAME, count) for
+     * a range of 'count' consecutive tiles starting at NAME.
      *
-     * Tile numbers for common actors (from names.h / CON defs):
-     *   LIZTROOP     = 1680   (troopers, ~40 frames)
-     *   LIZCAPT      = ????   (captains)
-     *   PIGCOP       = ????   (pig cops)
-     *   RECON        = ????   (recon cars)
-     *   DRONE        = ????   (protozoid drones)
-     *   COMMANDER    = ????   (enforcers)
-     *   OCTABRAIN    = ????   (octabrains)
-     *   BOSS1        = ????   (episode 1 boss)
-     *   BOSS2        = ????
-     *   BOSS3        = ????
+     * To find the right 'count' for an actor: look at names.h for the next
+     * actor's start tile and subtract, or check the BUILD editor's tile viewer.
+     * Overestimating count is safe — loadtile on an empty slot is a no-op.
      *
-     * Projectile/effect tiles:
-     *   RPG          = 2544   (RPG projectile)
-     *   SHOTSPARK1   = ????   (bullet impact spark)
-     *   EXPLOSION2   = 1890   (explosion, 21 frames)
-     *   FIRELASER    = ????   (tripbomb laser)
-     *   COOLEXPLOSION1 = ???? (shrinker hit)
-     *
-     * Instructions:
-     *   Replace ???? with actual tile numbers from names.h or the
-     *   BUILD editor. Uncomment and adjust ranges as needed.
-     *   The count should cover all animation frames for that actor.
+     * Tile ranges (from names.h):
+     *   LIZTROOP=1680  OCTABRAIN=1820  DRONE=1880  COMMANDER=1920
+     *   RECON=1960     PIGCOP=2000     BOSS1=2630  BOSS2=2710
+     *   BOSS3=2760     BOSS4=4740      SHOTSPARK1=2595
+     *   FIRELASER=1625 COOLEXPLOSION1=1360
      */
 
     /* --- ENEMIES --- */
-    // PRELOAD_RANGE(LIZTROOP, 40);
-    // PRELOAD_RANGE(PIGCOP, 40);
-    // PRELOAD_RANGE(OCTABRAIN, 40);
-    // PRELOAD_RANGE(RECON, 20);
-    // PRELOAD_RANGE(DRONE, 20);
-    // PRELOAD_RANGE(COMMANDER, 40);
+    PRELOAD_RANGE(LIZTROOP, 88);      /* 1680-1767: trooper all anims + jibs */
+    PRELOAD_RANGE(OCTABRAIN, 60);     /* 1820-1879 */
+    PRELOAD_RANGE(DRONE, 40);         /* 1880-1919 */
+    PRELOAD_RANGE(COMMANDER, 40);     /* 1920-1959: enforcers */
+    PRELOAD_RANGE(RECON, 15);         /* 1960-1974: recon cars */
+    PRELOAD_RANGE(PIGCOP, 120);       /* 2000-2119: pig cops all anims */
 
     /* --- BOSSES --- */
-    // PRELOAD_RANGE(BOSS1, 50);
-    // PRELOAD_RANGE(BOSS2, 50);
-    // PRELOAD_RANGE(BOSS3, 50);
+    PRELOAD_RANGE(BOSS1, 80);         /* 2630-2709 */
+    PRELOAD_RANGE(BOSS2, 50);         /* 2710-2759 */
+    PRELOAD_RANGE(BOSS3, 53);         /* 2760-2812 */
+    PRELOAD_RANGE(BOSS4, 124);        /* 4740-4863 */
 
     /* --- PROJECTILES --- */
-    // PRELOAD_RANGE(RPG, 8);
-    // PRELOAD_RANGE(FIRELASER, 6);
-    // PRELOAD_TILE(SHOTSPARK1);
+    PRELOAD_RANGE(RPG, 8);            /* 2605+ */
+    PRELOAD_RANGE(FIRELASER, 6);      /* 1625+ tripbomb laser */
+    PRELOAD_TILE(SHOTSPARK1);         /* 2595: bullet spark */
+    PRELOAD_RANGE(COOLEXPLOSION1, 4); /* 1360+ shrinker hit */
+    PRELOAD_RANGE(FREEZEBLAST, 3);    /* 1641+ freezer projectile */
+    PRELOAD_RANGE(SHRINKSPARK, 4);    /* 1646+ shrinker spark */
+    PRELOAD_RANGE(GROWSPARK, 4);      /* 2448+ expander spark */
 
     /* --- EFFECTS --- */
-    // PRELOAD_RANGE(EXPLOSION2, 21);
-    // PRELOAD_RANGE(BURNING, 14);
-    // PRELOAD_RANGE(BURNING2, 14);
-    // PRELOAD_RANGE(SMALLSMOKE, 4);
+    PRELOAD_RANGE(EXPLOSION2, 21);    /* 1890-1910 */
+    PRELOAD_RANGE(BURNING, 14);       /* 2270+ */
+    PRELOAD_RANGE(BURNING2, 14);      /* 2310+ */
+    PRELOAD_RANGE(SMALLSMOKE, 4);     /* 2329+ */
+    PRELOAD_RANGE(JIBS1, 20);         /* 2245+ gibs */
+    PRELOAD_RANGE(SCRAP1, 19);        /* 2400+ debris */
 
     /* ---- END OF TILE PRELOADS ---- */
 
