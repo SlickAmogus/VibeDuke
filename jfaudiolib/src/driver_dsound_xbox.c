@@ -271,9 +271,13 @@ int XboxDSDrv_PCM_Init(int *mixrate, int *numchannels, int *samplebits, void *in
     }
     xbox_log("XboxDS: DirectSoundCreate OK pDS=%p\n", (void *)pDS);
 
-    /* Override speaker config for 5.1 surround with AC3 */
-    DirectSoundOverrideSpeakerConfig(DSSPEAKER_ENABLE_AC3 | DSSPEAKER_SURROUND);
-    xbox_log("XboxDS: Set speaker config SURROUND+AC3\n");
+    /* Override speaker config: AC3 encoding only, NO surround matrix.
+     * DSSPEAKER_SURROUND enables Dolby Pro Logic matrix encoding in the GP,
+     * which derives surround from the stereo signal — causing music/effects
+     * to bleed into surround channels.  We do discrete 5.1 via explicit
+     * DSMIXBIN routing, so we only need AC3 encoding for S/PDIF output. */
+    DirectSoundOverrideSpeakerConfig(DSSPEAKER_ENABLE_AC3 | DSSPEAKER_STEREO);
+    xbox_log("XboxDS: Set speaker config STEREO+AC3 (discrete 5.1 via mixbins)\n");
 
     /* Set up wave format */
     memset(&wfx, 0, sizeof(wfx));
