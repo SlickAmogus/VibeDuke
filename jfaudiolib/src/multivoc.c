@@ -618,17 +618,21 @@ static void MV_ServiceVoc
       if ( MV_ReverbLevel == 0 )
          {
          memset( MV_Accum32, 0, count * sizeof(int) );
-         if ( MV_SurroundMode )
-            {
-            memset( MV_AccumCenter, 0, count * sizeof(int) );
-            memset( MV_AccumSurround, 0, count * sizeof(int) );
-            }
          }
       else
          {
          short *src16 = (short *) MV_MixBuffer[ MV_MixPage ];
          for ( i = 0; i < count; i++ )
             MV_Accum32[i] = src16[i];
+         }
+
+      /* Center/surround accumulators must ALWAYS be cleared — reverb only
+       * applies to the front stereo buffer, not surround channels. Without
+       * this, stale data accumulates and causes front→surround bleed. */
+      if ( MV_SurroundMode )
+         {
+         memset( MV_AccumCenter, 0, count * sizeof(int) );
+         memset( MV_AccumSurround, 0, count * sizeof(int) );
          }
    }
 
@@ -1584,6 +1588,19 @@ VoiceNode *MV_AllocVoice
 
    voice->handle = MV_VoiceHandle;
 
+#ifdef _XBOX
+   /* Reset surround state from previous voice — stale flags cause bleed */
+   voice->is_center      = 0;
+   voice->surround_sweep = 0;
+   voice->sweep_ticks    = 0;
+   voice->FLVolume       = &MV_VolumeTable[ 0 ];
+   voice->FRVolume       = &MV_VolumeTable[ 0 ];
+   voice->CenterVolume   = &MV_VolumeTable[ 0 ];
+   voice->LFEVolume      = &MV_VolumeTable[ 0 ];
+   voice->SLVolume       = &MV_VolumeTable[ 0 ];
+   voice->SRVolume       = &MV_VolumeTable[ 0 ];
+#endif
+
 #ifdef _XBOX_APU
    // Try to allocate an APU hardware voice
    voice->apu_voice = -1;
@@ -1865,13 +1882,20 @@ void MV_SetVoiceMixMode
       }
    else
       {
-      if ( IS_QUIET( voice->RightVolume ) )
+#ifdef _XBOX
+      /* In surround mode, never optimize to mono — all 3 passes need
+       * both L/R channels written by the mix function. */
+      if ( !MV_SurroundMode )
+#endif
          {
-         test |= T_RIGHTQUIET;
-         }
-      else if ( IS_QUIET( voice->LeftVolume ) )
-         {
-         test |= T_LEFTQUIET;
+         if ( IS_QUIET( voice->RightVolume ) )
+            {
+            test |= T_RIGHTQUIET;
+            }
+         else if ( IS_QUIET( voice->LeftVolume ) )
+            {
+            test |= T_LEFTQUIET;
+            }
          }
       }
 
@@ -3535,6 +3559,18 @@ void MV_SetVoiceCenter( int handle, int center )
    if ( voice == NULL ) return;
 
    voice->is_center = center ? 1 : 0;
+
+   /* Immediately re-route volumes so first mix buffer uses center.
+    * Use 200 as initial level — pan3dsound will correct on next tick. */
+   if ( MV_SurroundMode && voice->is_center )
+      {
+      voice->FLVolume      = &MV_VolumeTable[ 0 ];
+      voice->FRVolume      = &MV_VolumeTable[ 0 ];
+      voice->CenterVolume  = MV_GetVolumeTable( 200 );
+      voice->LFEVolume     = &MV_VolumeTable[ 0 ];
+      voice->SLVolume      = &MV_VolumeTable[ 0 ];
+      voice->SRVolume      = &MV_VolumeTable[ 0 ];
+      }
    }
 
 

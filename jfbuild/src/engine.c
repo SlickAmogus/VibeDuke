@@ -11452,6 +11452,7 @@ void buildprintf(const char *fmt, ...)
 		va_copy(vac, va);
 		vfprintf(logfile, fmt, vac);
 		va_end(vac);
+		fflush(logfile);
 	}
 
 	va_copy(vac, va);

@@ -92,7 +92,6 @@ static int IsCenterChannelSound(short num)
         case DUKE_CRACK:
         case DUKE_CRACK2:
         case DUKE_CRACK_FIRST:
-        case WATER_GURGLE:
             return 1;
         default:
             return 0;
@@ -651,6 +650,13 @@ int xyzsound(short num,short i,int x,int y,int z)
     if(sndist < ((255-LOUDESTVOLUME)<<6) )
         sndist = ((255-LOUDESTVOLUME)<<6);
 
+#ifdef _XBOX
+    /* Compensate for VOLUME_BOOST (4x) in driver_dsound_xbox.c.
+     * Scale distances up by 1.5x so the original distance model
+     * isn't blown out by the amplification. */
+    sndist = sndist * 3 / 2;
+#endif
+
     if( soundm[num]&1 )
     {
         if(Sound[num].num > 0) return -1;
@@ -670,12 +676,12 @@ int xyzsound(short num,short i,int x,int y,int z)
         Sound[num].num++;
 		  Sound[num].numall++;
 #ifdef _XBOX
-        /* Route Duke voice/speech and player-local sounds to center channel */
-        if ( (soundm[num] & 4) || IsCenterChannelSound(num) )
-            FX_SetVoiceCenter( voice, 1 );
-        /* Ambient sweep sounds: start from back-left, will sweep to back-right */
-        else if ( IsSurroundSweepSound(num) )
+        /* Sweep takes priority over center — some WAR_AMBIENCE sounds have
+         * CON flag 4 (Duke voice) which would wrongly route to center. */
+        if ( IsSurroundSweepSound(num) )
             FX_SetVoiceSurroundSweep( voice, 1 );
+        else if ( (soundm[num] & 4) || IsCenterChannelSound(num) )
+            FX_SetVoiceCenter( voice, 1 );
 #endif
     }
     else Sound[num].lock--;
@@ -738,22 +744,15 @@ void sound(short num)
         voice = FX_PlayAuto3D( Sound[ num ].ptr, soundsiz[num], pitch,0,255-LOUDESTVOLUME,soundpr[num], num );
     }
 
-#ifdef _XBOX
-    {
-        static int play_log_count = 0;
-        if (++play_log_count <= 5)
-            xbox_log("sound(%d): voice=%d LOUDEST=%d sndist=%d\n",
-                (int)num, voice, (int)LOUDESTVOLUME, 255-(int)LOUDESTVOLUME);
-    }
-#endif
     if(voice > FX_Ok) {
 		 Sound[num].numall++;
 #ifdef _XBOX
-         /* Route Duke voice/speech and player-local sounds to center channel */
-         if ( (soundm[num] & 4) || IsCenterChannelSound(num) )
-             FX_SetVoiceCenter( voice, 1 );
-         else if ( IsSurroundSweepSound(num) )
+         /* Sweep takes priority — CON flags (soundm&4) would wrongly
+          * route WAR_AMBIENCE to center instead of surround. */
+         if ( IsSurroundSweepSound(num) )
              FX_SetVoiceSurroundSweep( voice, 1 );
+         else if ( (soundm[num] & 4) || IsCenterChannelSound(num) )
+             FX_SetVoiceCenter( voice, 1 );
 #endif
 		 return;
 	 }
@@ -872,6 +871,11 @@ void pan3dsound(void)
 
         if(sndist < ((255-LOUDESTVOLUME)<<6) )
             sndist = ((255-LOUDESTVOLUME)<<6);
+
+#ifdef _XBOX
+        /* Compensate for VOLUME_BOOST (4x) — scale distances 1.5x */
+        sndist = sndist * 3 / 2;
+#endif
 
         FX_Pan3D(SoundOwner[j][k].voice,sndang>>6,sndist>>6);
     }

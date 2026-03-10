@@ -75,6 +75,8 @@ static int PumpCallCount = 0;
 /* Volume amplification — Xbox APU pipeline with AC3 encoding outputs quieter
  * than expected.  Boost PCM samples before writing to the DS buffer. */
 #define VOLUME_BOOST 4  /* 4x = ~12 dB gain */
+#define SURROUND_EXTRA_NUM 6  /* 6/5 = 1.2x = +20% extra for surround/center */
+#define SURROUND_EXTRA_DEN 5
 
 static void AmplifyBuffer(void *buf, DWORD bytes)
 {
@@ -87,6 +89,88 @@ static void AmplifyBuffer(void *buf, DWORD bytes)
         if (val > 32767) val = 32767;
         else if (val < -32768) val = -32768;
         samples[i] = (short)val;
+    }
+}
+
+static void AmplifyBufferSurround(void *buf, DWORD bytes)
+{
+    short *samples = (short *)buf;
+    DWORD count = bytes / 2;
+    DWORD i;
+
+    for (i = 0; i < count; i++) {
+        int val = (int)samples[i] * VOLUME_BOOST * SURROUND_EXTRA_NUM / SURROUND_EXTRA_DEN;
+        if (val > 32767) val = 32767;
+        else if (val < -32768) val = -32768;
+        samples[i] = (short)val;
+    }
+}
+
+/* Bass boost — simple one-pole low-pass filter applied additively.
+ * Extracts low-frequency content and mixes it back in at BASS_GAIN ratio.
+ * Cutoff ~150 Hz at 22050 Hz sample rate (alpha ≈ 0.04), ~150 Hz at 11025 Hz
+ * if mixrate is lower.  Stereo: L/R processed independently. */
+#define BASS_ALPHA_NUM  1    /* alpha = 1/24 ≈ 0.042 (~150 Hz @ 22050) */
+#define BASS_ALPHA_DEN  24
+#define BASS_GAIN_NUM   3    /* add 3/4 of low-passed signal back = ~+6 dB shelf */
+#define BASS_GAIN_DEN   4
+
+static int bass_state_l = 0;  /* fixed-point Q16 filter state */
+static int bass_state_r = 0;
+
+static void BassBoostBuffer(void *buf, DWORD bytes)
+{
+    short *samples = (short *)buf;
+    DWORD count = bytes / 2;  /* total samples (L+R interleaved) */
+    DWORD i;
+
+    for (i = 0; i + 1 < count; i += 2) {
+        int l = samples[i];
+        int r = samples[i + 1];
+
+        /* One-pole LPF: state += alpha * (input - state)  (Q16 fixed-point) */
+        bass_state_l += (l * 65536 - bass_state_l) * BASS_ALPHA_NUM / BASS_ALPHA_DEN;
+        bass_state_r += (r * 65536 - bass_state_r) * BASS_ALPHA_NUM / BASS_ALPHA_DEN;
+
+        /* Add filtered bass back to original */
+        l += (bass_state_l / 65536) * BASS_GAIN_NUM / BASS_GAIN_DEN;
+        r += (bass_state_r / 65536) * BASS_GAIN_NUM / BASS_GAIN_DEN;
+
+        if (l > 32767) l = 32767; else if (l < -32768) l = -32768;
+        if (r > 32767) r = 32767; else if (r < -32768) r = -32768;
+        samples[i] = (short)l;
+        samples[i + 1] = (short)r;
+    }
+}
+
+/* Feed low-frequency content from the front buffer into the LFE channel.
+ * This gives explosions and music a subwoofer presence. */
+#define LFE_FEED_NUM  1   /* 1/3 of low-passed front signal → LFE */
+#define LFE_FEED_DEN  3
+
+static int lfe_state_l = 0;
+static int lfe_state_r = 0;
+
+static void FeedLFE(void *front_buf, void *center_buf, DWORD bytes)
+{
+    short *front = (short *)front_buf;
+    short *center = (short *)center_buf;  /* LFE is right channel of center pair */
+    DWORD count = bytes / 2;
+    DWORD i;
+
+    for (i = 0; i + 1 < count; i += 2) {
+        int mono = ((int)front[i] + (int)front[i + 1]) / 2;
+
+        /* Low-pass for subwoofer content (~80 Hz) */
+        int state = (lfe_state_l + lfe_state_r) / 2;
+        state += (mono * 65536 - state) / 48;  /* alpha ≈ 1/48 → ~73 Hz @ 22050 */
+        lfe_state_l = state;
+        lfe_state_r = state;
+
+        /* Mix into LFE (right channel of center buffer) */
+        int lfe = (int)center[i + 1] + (state / 65536) * LFE_FEED_NUM / LFE_FEED_DEN;
+        if (lfe > 32767) lfe = 32767; else if (lfe < -32768) lfe = -32768;
+        center[i + 1] = (short)lfe;
     }
 }
 
@@ -442,14 +526,22 @@ static void PumpAudio(void)
                    surround ? (char *)sptr2 : NULL, surround);
     }
 
+    /* Bass boost on front buffer (before amplification, operates on raw mix) */
+    if (fptr1 && fbytes1) BassBoostBuffer(fptr1, fbytes1);
+    if (fptr2 && fbytes2) BassBoostBuffer(fptr2, fbytes2);
+
     /* Boost volume on all buffers */
     if (fptr1 && fbytes1) AmplifyBuffer(fptr1, fbytes1);
     if (fptr2 && fbytes2) AmplifyBuffer(fptr2, fbytes2);
     if (surround) {
-        if (cptr1 && cbytes1) AmplifyBuffer(cptr1, cbytes1);
-        if (cptr2 && cbytes2) AmplifyBuffer(cptr2, cbytes2);
-        if (sptr1 && sbytes1) AmplifyBuffer(sptr1, sbytes1);
-        if (sptr2 && sbytes2) AmplifyBuffer(sptr2, sbytes2);
+        if (cptr1 && cbytes1) AmplifyBufferSurround(cptr1, cbytes1);
+        if (cptr2 && cbytes2) AmplifyBufferSurround(cptr2, cbytes2);
+        if (sptr1 && sbytes1) AmplifyBufferSurround(sptr1, sbytes1);
+        if (sptr2 && sbytes2) AmplifyBufferSurround(sptr2, sbytes2);
+
+        /* Feed low-frequency from front into LFE (subwoofer) */
+        if (fptr1 && cptr1 && fbytes1) FeedLFE(fptr1, cptr1, fbytes1);
+        if (fptr2 && cptr2 && fbytes2) FeedLFE(fptr2, cptr2, fbytes2);
     }
 
     IDirectSoundBuffer_Unlock(pDSBuf, fptr1, fbytes1, fptr2, fbytes2);
