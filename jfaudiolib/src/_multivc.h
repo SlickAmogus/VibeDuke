@@ -147,6 +147,19 @@ typedef struct VoiceNode
    short        *LeftVolume;
    short        *RightVolume;
 
+#ifdef _XBOX
+   /* 5.1 surround volume tables (FL/FR/C/LFE/SL/SR) */
+   short        *FLVolume;
+   short        *FRVolume;
+   short        *CenterVolume;
+   short        *LFEVolume;
+   short        *SLVolume;
+   short        *SRVolume;
+   int           is_center;     /* 1 = route to center channel (Duke voice) */
+   int           surround_sweep; /* 1 = sweep from back-left to back-right */
+   int           sweep_ticks;    /* ticks elapsed for surround sweep */
+#endif
+
    unsigned int  callbackval;
 
 #ifdef _XBOX

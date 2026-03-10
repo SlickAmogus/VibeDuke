@@ -120,6 +120,13 @@ int FX_StartDemandFeedPlayback( void ( *function )( char **ptr, unsigned int *le
 int  FX_StartRecording( int MixRate, void ( *function )( char *ptr, int length ) );
 void FX_StopRecord( void );
 
+#ifdef _XBOX
+void FX_SetSurroundMode( int enable );
+int  FX_GetSurroundMode( void );
+void FX_SetVoiceCenter( int handle, int center );
+void FX_SetVoiceSurroundSweep( int handle, int enable );
+#endif
+
 #ifdef __cplusplus
 }
 #endif

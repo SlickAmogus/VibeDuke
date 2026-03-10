@@ -36,6 +36,90 @@ Modifications for JonoF's port by Jonathon Fowler (jf@jonof.id.au)
 
 #ifdef _XBOX
 #include <io.h>
+#include "fx_man.h"
+
+/* Sounds that should always play from the center channel in 5.1 surround.
+ * This includes Duke's voice lines (already handled by soundm & 4), plus
+ * Duke's weapon sounds, pain/grunt, landing, reloading, walking, breathing,
+ * jetpack, inventory activation, and other first-person player sounds.
+ * Enemy weapon/pain sounds are NOT included — they stay directional. */
+static int IsCenterChannelSound(short num)
+{
+    switch (num) {
+        /* Duke weapon fire + reload */
+        case KICK_HIT:
+        case PISTOL_FIRE:
+        case EJECT_CLIP:
+        case INSERT_CLIP:
+        case CHAINGUN_FIRE:
+        case RPG_SHOOT:
+        case SHRINKER_FIRE:
+        case SHOTGUN_FIRE:
+        case SHOTGUN_COCK:
+        case SELECT_WEAPON:
+        case EXPANDERSHOOT:
+        /* Duke pain / death / body sounds */
+        case DUKE_GRUNT:
+        case DUKE_SCREAM:
+        case DUKE_DEAD:
+        case DUKE_HARTBEAT:
+        case DUKE_LAND:
+        case DUKE_LAND_HURT:
+        case DUKE_BREATHING:
+        case DUKE_EXHALING:
+        case DUKE_GASP:
+        case DUKE_ONWATER:
+        case DUKE_UNDERWATER:
+        case DUKE_DRINKING:
+        case DUKE_STEPONFECES:
+        /* Duke walking / movement */
+        case DUKE_WALKINDUCTS:
+        /* Duke jetpack */
+        case DUKE_JETPACK_ON:
+        case DUKE_JETPACK_IDLE:
+        case DUKE_JETPACK_OFF:
+        /* Items / inventory activation */
+        case GETATOMICHEALTH:
+        case NITEVISION_ONOFF:
+        case DUKE_USEMEDKIT:
+        case DUKE_TAKEPILLS:
+        /* Misc player-local sounds */
+        case SHORT_CIRCUIT:
+        case MONITOR_ACTIVE:
+        case DUKE_URINATE:
+        case DUKE_PISSRELIEF:
+        case DUKE_PASSWIND:
+        case DUKE_CRACK:
+        case DUKE_CRACK2:
+        case DUKE_CRACK_FIRST:
+        case WATER_GURGLE:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Sounds that should sweep across the rear surround channels (SL→SR).
+ * These are ambient flyover/war sounds for immersive atmosphere. */
+static int IsSurroundSweepSound(short num)
+{
+    switch (num) {
+        case FLY_BY:
+        case WAR_AMBIENCE1:
+        case WAR_AMBIENCE2:
+        case WAR_AMBIENCE3:
+        case WAR_AMBIENCE4:
+        case WAR_AMBIENCE5:
+        case WAR_AMBIENCE6:
+        case WAR_AMBIENCE7:
+        case WAR_AMBIENCE8:
+        case WAR_AMBIENCE9:
+        case WAR_AMBIENCE10:
+            return 1;
+        default:
+            return 0;
+    }
+}
 #endif
 
 #define LOUDESTVOLUME 150
@@ -585,6 +669,14 @@ int xyzsound(short num,short i,int x,int y,int z)
         SoundOwner[num][Sound[num].num].voice = voice;
         Sound[num].num++;
 		  Sound[num].numall++;
+#ifdef _XBOX
+        /* Route Duke voice/speech and player-local sounds to center channel */
+        if ( (soundm[num] & 4) || IsCenterChannelSound(num) )
+            FX_SetVoiceCenter( voice, 1 );
+        /* Ambient sweep sounds: start from back-left, will sweep to back-right */
+        else if ( IsSurroundSweepSound(num) )
+            FX_SetVoiceSurroundSweep( voice, 1 );
+#endif
     }
     else Sound[num].lock--;
     return (voice);
@@ -656,6 +748,13 @@ void sound(short num)
 #endif
     if(voice > FX_Ok) {
 		 Sound[num].numall++;
+#ifdef _XBOX
+         /* Route Duke voice/speech and player-local sounds to center channel */
+         if ( (soundm[num] & 4) || IsCenterChannelSound(num) )
+             FX_SetVoiceCenter( voice, 1 );
+         else if ( IsSurroundSweepSound(num) )
+             FX_SetVoiceSurroundSweep( voice, 1 );
+#endif
 		 return;
 	 }
     Sound[num].lock--;

@@ -397,6 +397,133 @@ void cacheit(void)
 }
 
 
+#ifdef _XBOX
+/*
+ * =========================================================================
+ * Xbox Tile Preloading — Preload enemy, projectile, and effect sprites
+ * =========================================================================
+ *
+ * PURPOSE:
+ *   Force-load specific tile ranges into RAM at level start, before they
+ *   are first seen. This prevents in-game hitches when an enemy or
+ *   projectile appears for the first time and its tiles must be loaded
+ *   from the GRP on the Xbox's slow DVD/HDD.
+ *
+ * HOW TO ADD TILES:
+ *   1. Find the tile number(s) in the BUILD editor or source code.
+ *      Enemy/sprite tile numbers are defined in names.h (e.g. LIZTROOP=1680).
+ *      Each actor uses a contiguous range of tiles for animation frames.
+ *
+ *   2. Add a PRELOAD_RANGE(start, count) or PRELOAD_TILE(num) line below.
+ *      PRELOAD_RANGE loads 'count' consecutive tiles starting from 'start'.
+ *      PRELOAD_TILE loads a single tile.
+ *
+ *   3. Rebuild. Tiles will be loaded during level entry (after cacheit).
+ *
+ * EXAMPLES:
+ *   PRELOAD_RANGE(LIZTROOP, 40)     // Lizard trooper: 40 animation frames
+ *   PRELOAD_RANGE(BOSS1, 50)        // Episode 1 boss: 50 frames
+ *   PRELOAD_TILE(RPG)               // RPG projectile sprite
+ *   PRELOAD_RANGE(EXPLOSION2, 21)   // Explosion effect: 21 frames
+ *
+ * MEMORY NOTE:
+ *   Xbox has 64MB unified RAM. Each tile uses (width * height) bytes for
+ *   8-bit art, more for GPU textures. Monitor total usage — loading too
+ *   many tiles can starve the texture cache or cause OOM during gameplay.
+ *   Check the debug log for preload statistics.
+ *
+ * =========================================================================
+ */
+
+#define PRELOAD_TILE(tilenum) do { \
+    if ((tilenum) >= 0 && (tilenum) < MAXTILES) { \
+        if (waloff[tilenum] == 0) loadtile((short)(tilenum)); \
+        preload_count++; \
+    } \
+} while(0)
+
+#define PRELOAD_RANGE(start, count) do { \
+    int _t; \
+    for (_t = (start); _t < (start) + (count) && _t < MAXTILES; _t++) { \
+        if (waloff[_t] == 0) loadtile((short)_t); \
+        preload_count++; \
+    } \
+} while(0)
+
+static void xbox_preload_tiles(void)
+{
+    int preload_count = 0;
+    unsigned int t0 = getticks();
+
+    /*
+     * ---- ADD YOUR TILE PRELOADS BELOW THIS LINE ----
+     *
+     * Format:
+     *   PRELOAD_TILE(TILENUMBER)         — single tile
+     *   PRELOAD_RANGE(START, COUNT)      — range of COUNT tiles from START
+     *
+     * Tile numbers for common actors (from names.h / CON defs):
+     *   LIZTROOP     = 1680   (troopers, ~40 frames)
+     *   LIZCAPT      = ????   (captains)
+     *   PIGCOP       = ????   (pig cops)
+     *   RECON        = ????   (recon cars)
+     *   DRONE        = ????   (protozoid drones)
+     *   COMMANDER    = ????   (enforcers)
+     *   OCTABRAIN    = ????   (octabrains)
+     *   BOSS1        = ????   (episode 1 boss)
+     *   BOSS2        = ????
+     *   BOSS3        = ????
+     *
+     * Projectile/effect tiles:
+     *   RPG          = 2544   (RPG projectile)
+     *   SHOTSPARK1   = ????   (bullet impact spark)
+     *   EXPLOSION2   = 1890   (explosion, 21 frames)
+     *   FIRELASER    = ????   (tripbomb laser)
+     *   COOLEXPLOSION1 = ???? (shrinker hit)
+     *
+     * Instructions:
+     *   Replace ???? with actual tile numbers from names.h or the
+     *   BUILD editor. Uncomment and adjust ranges as needed.
+     *   The count should cover all animation frames for that actor.
+     */
+
+    /* --- ENEMIES --- */
+    // PRELOAD_RANGE(LIZTROOP, 40);
+    // PRELOAD_RANGE(PIGCOP, 40);
+    // PRELOAD_RANGE(OCTABRAIN, 40);
+    // PRELOAD_RANGE(RECON, 20);
+    // PRELOAD_RANGE(DRONE, 20);
+    // PRELOAD_RANGE(COMMANDER, 40);
+
+    /* --- BOSSES --- */
+    // PRELOAD_RANGE(BOSS1, 50);
+    // PRELOAD_RANGE(BOSS2, 50);
+    // PRELOAD_RANGE(BOSS3, 50);
+
+    /* --- PROJECTILES --- */
+    // PRELOAD_RANGE(RPG, 8);
+    // PRELOAD_RANGE(FIRELASER, 6);
+    // PRELOAD_TILE(SHOTSPARK1);
+
+    /* --- EFFECTS --- */
+    // PRELOAD_RANGE(EXPLOSION2, 21);
+    // PRELOAD_RANGE(BURNING, 14);
+    // PRELOAD_RANGE(BURNING2, 14);
+    // PRELOAD_RANGE(SMALLSMOKE, 4);
+
+    /* ---- END OF TILE PRELOADS ---- */
+
+    {
+        unsigned int t1 = getticks();
+        xbox_log("xbox_preload_tiles: loaded %d tiles in %dms\n",
+            preload_count, t1 - t0);
+    }
+}
+
+#undef PRELOAD_TILE
+#undef PRELOAD_RANGE
+#endif /* _XBOX */
+
 
 void xyzmirror(short i,short wn)
 {
@@ -1564,6 +1691,7 @@ int enterlevel(unsigned char g)
 #ifdef _XBOX
     buildprintf("enterlevel: cacheit done\n");
     xbox_log("enterlevel: cacheit done\n");
+    xbox_preload_tiles();
 #endif
 
     if(ud.recstat != 2)

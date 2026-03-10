@@ -96,7 +96,16 @@ char *MV_MixBuffer[ NumberOfBuffers + 1 ];
 
 #ifdef _XBOX
 // 32-bit accumulator buffer for Xbox: eliminates per-voice clipping distortion
-static int MV_Accum32[ MixBufferSize * 2 ];  // stereo int32 pairs
+static int MV_Accum32[ MixBufferSize * 2 ];  // stereo int32 pairs (front in surround mode)
+
+/* 5.1 surround mode */
+static int MV_SurroundMode = 0;
+static int MV_AccumCenter[ MixBufferSize * 2 ];   // C/LFE int32 pairs
+static int MV_AccumSurround[ MixBufferSize * 2 ]; // SL/SR int32 pairs
+static short MV_CenterMixOut[ MixBufferSize * 2 ];   // center 16-bit output
+static short MV_SurroundMixOut[ MixBufferSize * 2 ];  // surround 16-bit output
+short *MV_CenterMixBuf = MV_CenterMixOut;
+short *MV_SurroundMixBuf = MV_SurroundMixOut;
 #endif
 
 static VoiceNode *MV_Voices = NULL;
@@ -112,6 +121,9 @@ static void ( *MV_RecordFunc )( char *ptr, int length ) = NULL;
 static void ( *MV_MixFunction )( VoiceNode *voice, int buffer );
 
 int MV_MaxVolume = 63;
+
+/* Forward declaration — needed before MV_ServiceVoc (surround sweep) */
+static short *MV_GetVolumeTable( int vol );
 
 char  *MV_HarshClipTable;
 char  *MV_MixDestination;
@@ -243,6 +255,10 @@ static void MV_Mix
    unsigned int   position;
    unsigned int   rate;
    unsigned int   FixedPointBufferSize;
+#ifdef _XBOX
+   /* Surround mode: track 3 destination pointers for 3-pass mixing */
+   char *dest_front, *dest_center, *dest_surround;
+#endif
 
    if ( ( voice->length == 0 ) && ( voice->GetSound( voice ) != KeepPlaying ) )
       {
@@ -253,23 +269,34 @@ static void MV_Mix
    length               = MixBufferSize;
    FixedPointBufferSize = voice->FixedPointBufferSize;
 
-   #ifdef _XBOX
-   MV_MixDestination    = (char *) MV_Accum32;
-   #else
+#ifdef _XBOX
+   dest_front    = (char *) MV_Accum32;
+   dest_center   = (char *) MV_AccumCenter;
+   dest_surround = (char *) MV_AccumSurround;
+
+   if ( !MV_SurroundMode )
+      {
+      MV_MixDestination = dest_front;
+      MV_LeftVolume     = voice->LeftVolume;
+      MV_RightVolume    = voice->RightVolume;
+
+      if ( ( MV_Channels == 2 ) && ( IS_QUIET( MV_LeftVolume ) ) )
+         {
+         MV_LeftVolume      = MV_RightVolume;
+         MV_MixDestination += sizeof(int);
+         }
+      }
+#else
    MV_MixDestination    = MV_MixBuffer[ buffer ];
-   #endif
    MV_LeftVolume        = voice->LeftVolume;
    MV_RightVolume       = voice->RightVolume;
 
    if ( ( MV_Channels == 2 ) && ( IS_QUIET( MV_LeftVolume ) ) )
       {
       MV_LeftVolume      = MV_RightVolume;
-      #ifdef _XBOX
-      MV_MixDestination += sizeof(int);  // skip to right channel in int32 buffer
-      #else
       MV_MixDestination += MV_RightChannelOffset;
-      #endif
       }
+#endif
 
    // Add this voice to the mix
    while( length > 0 )
@@ -300,8 +327,6 @@ static void MV_Mix
 
 #ifdef _XBOX_APU_MIXBUF_WORKING
       // DISABLED: VP doesn't write to GP XMEM MIXBUF on real hardware.
-      // MIXBUF values are stale kernel residual, producing a constant ringing tone.
-      // Re-enable this when VP→MIXBUF pipeline is confirmed working.
       if ( MV_ApuInitialized && voice->apu_voice >= 0 && voice->apu_started )
          {
          MV_MixPosition = position + rate * voclength;
@@ -310,6 +335,39 @@ static void MV_Mix
 #endif
       if (voice->mix) {
 #ifdef _XBOX
+         if ( MV_SurroundMode )
+            {
+            /* 3-pass surround mixing: reuse existing stereo mix functions
+             * with different volume tables and destination buffers. */
+            char *saved_front, *saved_center, *saved_surround;
+
+            /* --- Pass 1: Front (FL/FR) --- */
+            MV_MixDestination = dest_front;
+            MV_LeftVolume     = voice->FLVolume;
+            MV_RightVolume    = voice->FRVolume;
+            voice->mix( position, rate, start, voclength );
+            saved_front = MV_MixDestination;
+
+            /* --- Pass 2: Center / LFE --- */
+            MV_MixDestination = dest_center;
+            MV_LeftVolume     = voice->CenterVolume;
+            MV_RightVolume    = voice->LFEVolume;
+            voice->mix( position, rate, start, voclength );
+            saved_center = MV_MixDestination;
+
+            /* --- Pass 3: Surround (SL/SR) --- */
+            MV_MixDestination = dest_surround;
+            MV_LeftVolume     = voice->SLVolume;
+            MV_RightVolume    = voice->SRVolume;
+            voice->mix( position, rate, start, voclength );
+            saved_surround = MV_MixDestination;
+
+            dest_front    = saved_front;
+            dest_center   = saved_center;
+            dest_surround = saved_surround;
+            }
+         else
+         {
          // Fade-in ramp: save accumulator before mixing, then scale this
          // voice's contribution for the first MV_RAMP_SAMPLES samples.
          // Eliminates click transients when voices start abruptly.
@@ -345,6 +403,9 @@ static void MV_Mix
             {
             voice->mix( position, rate, start, voclength );
             }
+#ifdef _XBOX
+         }
+#endif
       }
 
       voice->position = MV_MixPosition;
@@ -557,6 +618,11 @@ static void MV_ServiceVoc
       if ( MV_ReverbLevel == 0 )
          {
          memset( MV_Accum32, 0, count * sizeof(int) );
+         if ( MV_SurroundMode )
+            {
+            memset( MV_AccumCenter, 0, count * sizeof(int) );
+            memset( MV_AccumSurround, 0, count * sizeof(int) );
+            }
          }
       else
          {
@@ -672,7 +738,28 @@ static void MV_ServiceVoc
       // Skip software mix when APU hardware mixing is active.
       if ( !MV_ApuInitialized )
 #endif
+      {
+#ifdef _XBOX
+      /* Update surround sweep: crossfade SL→SR over the voice's duration.
+       * Each ServiceVoc tick mixes MixBufferSize bytes (~1.45ms at 44100Hz).
+       * We sweep over ~90 ticks (~2 seconds) from full SL to full SR. */
+      if ( MV_SurroundMode && voice->surround_sweep )
+         {
+         #define SWEEP_TICKS 90
+         int t = voice->sweep_ticks;
+         int level = 200;
+         int sl, sr;
+         if ( t >= SWEEP_TICKS ) t = SWEEP_TICKS;
+         sr = level * t / SWEEP_TICKS;
+         sl = level - sr;
+         voice->SLVolume = MV_GetVolumeTable( sl );
+         voice->SRVolume = MV_GetVolumeTable( sr );
+         voice->sweep_ticks++;
+         #undef SWEEP_TICKS
+         }
+#endif
       MV_MixFunction( voice, MV_MixPage );
+      }
 
       next = voice->next;
 
@@ -700,24 +787,34 @@ static void MV_ServiceVoc
    {
       int i, count = MixBufferSize * MV_Channels;
       short *out = (short *) MV_MixBuffer[ MV_MixPage ];
+
+      #define SOFT_LIMIT(s) do { \
+         s >>= 1; \
+         if ( s > 20000 ) { int over = s - 20000; s = 20000 + (int)((long long)over * 12767 / (over + 12767)); } \
+         else if ( s < -20000 ) { int over = -s - 20000; s = -(20000 + (int)((long long)over * 12767 / (over + 12767))); } \
+      } while(0)
+
       for ( i = 0; i < count; i++ )
          {
-         // Halve the accumulated signal to prevent the limiter from engaging
-         // during normal gameplay.  Keeps multi-voice mixes in the linear
-         // region; compensate with TV/system volume.
-         int s = MV_Accum32[i] >> 1;
-         if ( s > 20000 )
-            {
-            int over = s - 20000;
-            s = 20000 + (int)((long long)over * 12767 / (over + 12767));
-            }
-         else if ( s < -20000 )
-            {
-            int over = -s - 20000;
-            s = -(20000 + (int)((long long)over * 12767 / (over + 12767)));
-            }
+         int s = MV_Accum32[i];
+         SOFT_LIMIT(s);
          out[i] = (short) s;
          }
+
+      if ( MV_SurroundMode )
+         {
+         /* Convert center and surround accumulators to 16-bit output buffers */
+         for ( i = 0; i < count; i++ )
+            {
+            int c = MV_AccumCenter[i];
+            int r = MV_AccumSurround[i];
+            SOFT_LIMIT(c);
+            SOFT_LIMIT(r);
+            MV_CenterMixOut[i] = (short) c;
+            MV_SurroundMixOut[i] = (short) r;
+            }
+         }
+      #undef SOFT_LIMIT
    }
    #endif
 
@@ -1933,6 +2030,39 @@ void MV_SetVoiceVolume
       voice->RightVolume = MV_GetVolumeTable( right );
       }
 
+#ifdef _XBOX
+   /* Default surround volumes: same as stereo L/R for front, silence for rest.
+    * MV_Pan3D_Surround overrides these with proper 5.1 panning. */
+   if ( MV_SurroundMode )
+      {
+      if ( voice->surround_sweep )
+         {
+         /* Sweep voice: surround volumes managed by ServiceVoc tick — don't touch */
+         }
+      else if ( voice->is_center )
+         {
+         /* Center channel voice: route to center, silence everything else */
+         int center_vol = max( left, right );
+         voice->FLVolume      = &MV_VolumeTable[ 0 ];
+         voice->FRVolume      = &MV_VolumeTable[ 0 ];
+         voice->CenterVolume  = MV_GetVolumeTable( center_vol );
+         voice->LFEVolume     = &MV_VolumeTable[ 0 ];
+         voice->SLVolume      = &MV_VolumeTable[ 0 ];
+         voice->SRVolume      = &MV_VolumeTable[ 0 ];
+         }
+      else
+         {
+         /* Default: front stereo, no surround (will be overridden by Pan3D) */
+         voice->FLVolume      = voice->LeftVolume;
+         voice->FRVolume      = voice->RightVolume;
+         voice->CenterVolume  = &MV_VolumeTable[ 0 ];
+         voice->LFEVolume     = &MV_VolumeTable[ 0 ];
+         voice->SLVolume      = &MV_VolumeTable[ 0 ];
+         voice->SRVolume      = &MV_VolumeTable[ 0 ];
+         }
+      }
+#endif
+
 #ifdef _XBOX_APU
    if ( MV_ApuInitialized && voice->apu_voice >= 0 )
       {
@@ -2062,6 +2192,65 @@ int MV_Pan3D
    mid   = max( 0, 255 - distance );
 
    status = MV_SetPan( handle, mid, left, right );
+
+#ifdef _XBOX
+   /* After SetPan sets the base stereo volumes, override with 5.1 panning.
+    * Angle 0-31: 0=front, 8=right, 16=behind, 24=left.
+    * We distribute the sound across FL/FR/SL/SR based on quadrant. */
+   if ( MV_SurroundMode && status == MV_Ok )
+      {
+      VoiceNode *voice = MV_GetVoice( handle );
+      if ( voice != NULL && !voice->is_center && !voice->surround_sweep )
+         {
+         int level = max( 0, 255 - distance );
+         int fl, fr, sl, sr;
+
+         /* 4-speaker VBAP panning: compute per-speaker gains.
+          * Angles: 0=front-center, 8=right, 16=back, 24=left.
+          * Front speakers cover angles 0-8 and 24-31.
+          * Surround speakers cover angles 8-24. */
+         if ( angle <= 8 )
+            {
+            /* Front-right quadrant (0-8): FL→FR crossfade, no surround */
+            fr = level * angle / 8;
+            fl = level - fr;
+            sl = 0;
+            sr = 0;
+            }
+         else if ( angle <= 16 )
+            {
+            /* Right-rear quadrant (8-16): FR→SR crossfade */
+            sr = level * ( angle - 8 ) / 8;
+            fr = level - sr;
+            fl = 0;
+            sl = 0;
+            }
+         else if ( angle <= 24 )
+            {
+            /* Rear-left quadrant (16-24): SR→SL crossfade */
+            sl = level * ( angle - 16 ) / 8;
+            sr = level - sl;
+            fl = 0;
+            fr = 0;
+            }
+         else
+            {
+            /* Left-front quadrant (24-31): SL→FL crossfade */
+            fl = level * ( angle - 24 ) / 8;
+            sl = level - fl;
+            fr = 0;
+            sr = 0;
+            }
+
+         voice->FLVolume     = MV_GetVolumeTable( fl );
+         voice->FRVolume     = MV_GetVolumeTable( fr );
+         voice->CenterVolume = &MV_VolumeTable[ 0 ];
+         voice->LFEVolume    = &MV_VolumeTable[ 0 ];
+         voice->SLVolume     = MV_GetVolumeTable( sl );
+         voice->SRVolume     = MV_GetVolumeTable( sr );
+         }
+      }
+#endif
 
    return( status );
    }
@@ -3220,6 +3409,17 @@ int MV_Init
 
    for( index = 0; index < Voices; index++ )
       {
+#ifdef _XBOX
+      MV_Voices[ index ].is_center = 0;
+      MV_Voices[ index ].surround_sweep = 0;
+      MV_Voices[ index ].sweep_ticks = 0;
+      MV_Voices[ index ].FLVolume      = &MV_VolumeTable[ 0 ];
+      MV_Voices[ index ].FRVolume      = &MV_VolumeTable[ 0 ];
+      MV_Voices[ index ].CenterVolume  = &MV_VolumeTable[ 0 ];
+      MV_Voices[ index ].LFEVolume     = &MV_VolumeTable[ 0 ];
+      MV_Voices[ index ].SLVolume      = &MV_VolumeTable[ 0 ];
+      MV_Voices[ index ].SRVolume      = &MV_VolumeTable[ 0 ];
+#endif
 #ifdef _XBOX_APU
       MV_Voices[ index ].apu_voice = -1;
       MV_Voices[ index ].apu_started = 0;
@@ -3299,6 +3499,76 @@ int MV_Init
 
    return( MV_Ok );
    }
+
+
+#ifdef _XBOX
+/*---------------------------------------------------------------------
+   Function: MV_SetSurroundMode
+
+   Enable or disable 5.1 surround sound output.
+---------------------------------------------------------------------*/
+
+void MV_SetSurroundMode( int enable )
+   {
+   MV_SurroundMode = enable ? 1 : 0;
+   }
+
+int MV_GetSurroundMode( void )
+   {
+   return MV_SurroundMode;
+   }
+
+
+/*---------------------------------------------------------------------
+   Function: MV_SetVoiceCenter
+
+   Mark or unmark a voice for center channel routing (Duke voice lines).
+---------------------------------------------------------------------*/
+
+void MV_SetVoiceCenter( int handle, int center )
+   {
+   VoiceNode *voice;
+
+   if ( !MV_Installed ) return;
+
+   voice = MV_GetVoice( handle );
+   if ( voice == NULL ) return;
+
+   voice->is_center = center ? 1 : 0;
+   }
+
+
+/*---------------------------------------------------------------------
+   Function: MV_SetVoiceSurroundSweep
+
+   Mark a voice to sweep from back-left to back-right over its duration.
+   Sets initial volumes to full SL, zero SR.
+---------------------------------------------------------------------*/
+
+void MV_SetVoiceSurroundSweep( int handle, int enable )
+   {
+   VoiceNode *voice;
+
+   if ( !MV_Installed || !MV_SurroundMode ) return;
+
+   voice = MV_GetVoice( handle );
+   if ( voice == NULL ) return;
+
+   voice->surround_sweep = enable ? 1 : 0;
+   voice->sweep_ticks = 0;
+   if ( enable )
+      {
+      /* Start fully in back-left, silence everywhere else */
+      int level = 200;  /* healthy volume level */
+      voice->FLVolume      = &MV_VolumeTable[ 0 ];
+      voice->FRVolume      = &MV_VolumeTable[ 0 ];
+      voice->CenterVolume  = &MV_VolumeTable[ 0 ];
+      voice->LFEVolume     = &MV_VolumeTable[ 0 ];
+      voice->SLVolume      = MV_GetVolumeTable( level );
+      voice->SRVolume      = &MV_VolumeTable[ 0 ];
+      }
+   }
+#endif
 
 
 /*---------------------------------------------------------------------

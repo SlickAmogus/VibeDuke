@@ -23,6 +23,7 @@
 #include <dsound.h>
 
 #include "driver_dsound_xbox.h"
+#include "multivoc.h"
 #include "asssys.h"
 #include <string.h>
 
@@ -52,7 +53,9 @@ static int Initialised = 0;
 static int Playing = 0;
 
 static IDirectSound *pDS = NULL;
-static IDirectSoundBuffer *pDSBuf = NULL;
+static IDirectSoundBuffer *pDSBuf = NULL;         /* Front (FL/FR) - default mixbins */
+static IDirectSoundBuffer *pDSBufCenter = NULL;   /* Center/LFE - custom mixbins */
+static IDirectSoundBuffer *pDSBufSurround = NULL; /* Surround (SL/SR) - custom mixbins */
 
 /* Ring buffer from MultiVoc */
 static char *MixBuffer = NULL;
@@ -217,7 +220,56 @@ int XboxDSDrv_PCM_Init(int *mixrate, int *numchannels, int *samplebits, void *in
     xbox_log("XboxDS: CreateSoundBuffer OK pBuf=%p size=%d\n",
         (void *)pDSBuf, DS_BUFFER_SIZE);
 
-    /* Clear the buffer */
+    /* Create Center/LFE and Surround buffers with custom mixbin routing */
+    {
+        DSMIXBINVOLUMEPAIR centerPairs[2];
+        DSMIXBINS centerBins;
+        DSMIXBINVOLUMEPAIR surroundPairs[2];
+        DSMIXBINS surroundBins;
+
+        /* Center buffer: ch0→Center, ch1→LFE */
+        centerPairs[0].dwMixBin = DSMIXBIN_FRONT_CENTER;
+        centerPairs[0].lVolume  = 0; /* DSBVOLUME_MAX */
+        centerPairs[1].dwMixBin = DSMIXBIN_LOW_FREQUENCY;
+        centerPairs[1].lVolume  = 0;
+        centerBins.dwMixBinCount = 2;
+        centerBins.lpMixBinVolumePairs = centerPairs;
+
+        dsbd.lpMixBins = &centerBins;
+        hr = IDirectSound_CreateSoundBuffer(pDS, &dsbd, &pDSBufCenter, NULL);
+        if (FAILED(hr)) {
+            xbox_log("XboxDS: CreateSoundBuffer CENTER FAILED hr=0x%08X\n", (unsigned)hr);
+            /* Non-fatal: fall back to stereo-only */
+            pDSBufCenter = NULL;
+        } else {
+            xbox_log("XboxDS: Center/LFE buffer created OK\n");
+        }
+
+        /* Surround buffer: ch0→BackLeft, ch1→BackRight */
+        surroundPairs[0].dwMixBin = DSMIXBIN_BACK_LEFT;
+        surroundPairs[0].lVolume  = 0;
+        surroundPairs[1].dwMixBin = DSMIXBIN_BACK_RIGHT;
+        surroundPairs[1].lVolume  = 0;
+        surroundBins.dwMixBinCount = 2;
+        surroundBins.lpMixBinVolumePairs = surroundPairs;
+
+        dsbd.lpMixBins = &surroundBins;
+        hr = IDirectSound_CreateSoundBuffer(pDS, &dsbd, &pDSBufSurround, NULL);
+        if (FAILED(hr)) {
+            xbox_log("XboxDS: CreateSoundBuffer SURROUND FAILED hr=0x%08X\n", (unsigned)hr);
+            pDSBufSurround = NULL;
+        } else {
+            xbox_log("XboxDS: Surround buffer created OK\n");
+        }
+    }
+
+    /* Enable 5.1 surround if center and surround buffers were created */
+    if (pDSBufCenter && pDSBufSurround) {
+        MV_SetSurroundMode(1);
+        xbox_log("XboxDS: 5.1 surround mode ENABLED\n");
+    }
+
+    /* Clear all buffers */
     {
         LPVOID ptr1;
         DWORD bytes1;
@@ -226,6 +278,22 @@ int XboxDSDrv_PCM_Init(int *mixrate, int *numchannels, int *samplebits, void *in
         if (SUCCEEDED(hr)) {
             memset(ptr1, 0, bytes1);
             IDirectSoundBuffer_Unlock(pDSBuf, ptr1, bytes1, NULL, 0);
+        }
+        if (pDSBufCenter) {
+            hr = IDirectSoundBuffer_Lock(pDSBufCenter, 0, DS_BUFFER_SIZE,
+                &ptr1, &bytes1, NULL, NULL, DSBLOCK_ENTIREBUFFER);
+            if (SUCCEEDED(hr)) {
+                memset(ptr1, 0, bytes1);
+                IDirectSoundBuffer_Unlock(pDSBufCenter, ptr1, bytes1, NULL, 0);
+            }
+        }
+        if (pDSBufSurround) {
+            hr = IDirectSoundBuffer_Lock(pDSBufSurround, 0, DS_BUFFER_SIZE,
+                &ptr1, &bytes1, NULL, NULL, DSBLOCK_ENTIREBUFFER);
+            if (SUCCEEDED(hr)) {
+                memset(ptr1, 0, bytes1);
+                IDirectSoundBuffer_Unlock(pDSBufSurround, ptr1, bytes1, NULL, 0);
+            }
         }
     }
 
@@ -247,6 +315,14 @@ void XboxDSDrv_PCM_Shutdown(void)
         XboxDSDrv_PCM_StopPlayback();
     }
 
+    if (pDSBufSurround) {
+        IDirectSoundBuffer_Release(pDSBufSurround);
+        pDSBufSurround = NULL;
+    }
+    if (pDSBufCenter) {
+        IDirectSoundBuffer_Release(pDSBufCenter);
+        pDSBufCenter = NULL;
+    }
     if (pDSBuf) {
         IDirectSoundBuffer_Release(pDSBuf);
         pDSBuf = NULL;
@@ -260,109 +336,130 @@ void XboxDSDrv_PCM_Shutdown(void)
     Initialised = 0;
 }
 
-/* Pump PCM data from MultiVoc ring buffer into DirectSound buffer.
- * Called from the game loop (via DirectSoundDoWork integration). */
+/* Fill a DS buffer region from the MV ring buffer (front) and optionally
+ * from center/surround static buffers.  MixCallBack is called when a
+ * division boundary is crossed, which generates all 3 outputs at once. */
+static void FillRegion(char *fdst, DWORD bytes,
+                       char *cdst, char *sdst, int surround)
+{
+    DWORD remaining = bytes;
+
+    while (remaining > 0) {
+        char *src;
+        DWORD avail, chunk;
+
+        if (MixBufferUsed >= MixBufferSize) {
+            MixCallBack();
+            MixBufferUsed = 0;
+            MixBufferCurrent++;
+            if (MixBufferCurrent >= MixBufferCount)
+                MixBufferCurrent = 0;
+        }
+
+        src = MixBuffer + (MixBufferCurrent * MixBufferSize) + MixBufferUsed;
+        avail = MixBufferSize - MixBufferUsed;
+        chunk = (remaining < avail) ? remaining : avail;
+
+        memcpy(fdst, src, chunk);
+        fdst += chunk;
+
+        if (surround && cdst) {
+            memcpy(cdst, (char *)MV_CenterMixBuf + MixBufferUsed, chunk);
+            cdst += chunk;
+        }
+        if (surround && sdst) {
+            memcpy(sdst, (char *)MV_SurroundMixBuf + MixBufferUsed, chunk);
+            sdst += chunk;
+        }
+
+        MixBufferUsed += chunk;
+        remaining -= chunk;
+    }
+}
+
+/* Pump PCM data from MultiVoc ring buffer into DirectSound buffer(s).
+ * Called from the game loop (via DirectSoundDoWork integration).
+ * In surround mode, fills front/center/surround buffers in lockstep. */
 static void PumpAudio(void)
 {
     DWORD playCursor, writeCursor;
     DWORD writeBytes;
     HRESULT hr;
-    LPVOID ptr1 = NULL, ptr2 = NULL;
-    DWORD bytes1 = 0, bytes2 = 0;
+    LPVOID fptr1 = NULL, fptr2 = NULL;
+    DWORD fbytes1 = 0, fbytes2 = 0;
+    LPVOID cptr1 = NULL, cptr2 = NULL;
+    DWORD cbytes1 = 0, cbytes2 = 0;
+    LPVOID sptr1 = NULL, sptr2 = NULL;
+    DWORD sbytes1 = 0, sbytes2 = 0;
+    int surround = (pDSBufCenter && pDSBufSurround && MV_GetSurroundMode());
 
     if (!Playing || !pDSBuf || !MixCallBack) return;
 
     PumpCallCount++;
 
-    /* Get current play position */
+    /* Get current play position from front buffer (master clock) */
     hr = IDirectSoundBuffer_GetCurrentPosition(pDSBuf, &playCursor, &writeCursor);
     if (FAILED(hr)) return;
 
-    /* Calculate how much space is available to write.
-     * We write from our DSWriteCursor up to (but not including) playCursor. */
+    /* Calculate how much space is available to write */
     if (DSWriteCursor <= playCursor) {
         writeBytes = playCursor - DSWriteCursor;
     } else {
         writeBytes = DS_BUFFER_SIZE - DSWriteCursor + playCursor;
     }
 
-    /* Don't write too close to play cursor — leave some headroom */
     if (writeBytes < 1024) return;
-    writeBytes -= 512; /* Safety margin */
+    writeBytes -= 512;
 
-    /* Log periodically */
     if (PumpCallCount <= 5 || (PumpCallCount % 200 == 0)) {
-        xbox_log("XboxDS: Pump#%d play=%u write=%u ours=%u avail=%u\n",
-            PumpCallCount, (unsigned)playCursor, (unsigned)writeCursor,
-            (unsigned)DSWriteCursor, (unsigned)writeBytes);
+        xbox_log("XboxDS: Pump#%d play=%u ours=%u avail=%u surr=%d\n",
+            PumpCallCount, (unsigned)playCursor,
+            (unsigned)DSWriteCursor, (unsigned)writeBytes, surround);
     }
 
-    /* Lock the DirectSound buffer region we want to fill */
+    /* Lock front buffer */
     hr = IDirectSoundBuffer_Lock(pDSBuf, DSWriteCursor, writeBytes,
-        &ptr1, &bytes1, &ptr2, &bytes2, 0);
+        &fptr1, &fbytes1, &fptr2, &fbytes2, 0);
     if (FAILED(hr)) return;
 
-    /* Fill from MultiVoc ring buffer */
-    {
-        char *dst = (char *)ptr1;
-        DWORD remaining = bytes1;
-
-        while (remaining > 0) {
-            if (MixBufferUsed >= MixBufferSize) {
-                /* Need next division — call MultiVoc to generate more PCM */
-                MixCallBack();
-                MixBufferUsed = 0;
-                MixBufferCurrent++;
-                if (MixBufferCurrent >= MixBufferCount) {
-                    MixBufferCurrent = 0;
-                }
-            }
-
-            char *src = MixBuffer + (MixBufferCurrent * MixBufferSize) + MixBufferUsed;
-            DWORD avail = MixBufferSize - MixBufferUsed;
-            DWORD chunk = (remaining < avail) ? remaining : avail;
-
-            memcpy(dst, src, chunk);
-            dst += chunk;
-            MixBufferUsed += chunk;
-            remaining -= chunk;
-        }
-
-        /* Handle wrap-around region (ptr2) */
-        if (ptr2 && bytes2 > 0) {
-            dst = (char *)ptr2;
-            remaining = bytes2;
-
-            while (remaining > 0) {
-                if (MixBufferUsed >= MixBufferSize) {
-                    MixCallBack();
-                    MixBufferUsed = 0;
-                    MixBufferCurrent++;
-                    if (MixBufferCurrent >= MixBufferCount) {
-                        MixBufferCurrent = 0;
-                    }
-                }
-
-                char *src = MixBuffer + (MixBufferCurrent * MixBufferSize) + MixBufferUsed;
-                DWORD avail = MixBufferSize - MixBufferUsed;
-                DWORD chunk = (remaining < avail) ? remaining : avail;
-
-                memcpy(dst, src, chunk);
-                dst += chunk;
-                MixBufferUsed += chunk;
-                remaining -= chunk;
-            }
-        }
+    /* Lock center and surround buffers at the same position */
+    if (surround) {
+        IDirectSoundBuffer_Lock(pDSBufCenter, DSWriteCursor, writeBytes,
+            &cptr1, &cbytes1, &cptr2, &cbytes2, 0);
+        IDirectSoundBuffer_Lock(pDSBufSurround, DSWriteCursor, writeBytes,
+            &sptr1, &sbytes1, &sptr2, &sbytes2, 0);
     }
 
-    /* Boost volume before handing buffer back to hardware */
-    if (ptr1 && bytes1) AmplifyBuffer(ptr1, bytes1);
-    if (ptr2 && bytes2) AmplifyBuffer(ptr2, bytes2);
+    /* Fill region 1 (all buffers in lockstep) */
+    FillRegion((char *)fptr1, fbytes1,
+               surround ? (char *)cptr1 : NULL,
+               surround ? (char *)sptr1 : NULL, surround);
 
-    IDirectSoundBuffer_Unlock(pDSBuf, ptr1, bytes1, ptr2, bytes2);
+    /* Fill wrap-around region 2 */
+    if (fptr2 && fbytes2 > 0) {
+        FillRegion((char *)fptr2, fbytes2,
+                   surround ? (char *)cptr2 : NULL,
+                   surround ? (char *)sptr2 : NULL, surround);
+    }
 
-    /* Advance our write cursor */
-    DSWriteCursor = (DSWriteCursor + bytes1 + bytes2) % DS_BUFFER_SIZE;
+    /* Boost volume on all buffers */
+    if (fptr1 && fbytes1) AmplifyBuffer(fptr1, fbytes1);
+    if (fptr2 && fbytes2) AmplifyBuffer(fptr2, fbytes2);
+    if (surround) {
+        if (cptr1 && cbytes1) AmplifyBuffer(cptr1, cbytes1);
+        if (cptr2 && cbytes2) AmplifyBuffer(cptr2, cbytes2);
+        if (sptr1 && sbytes1) AmplifyBuffer(sptr1, sbytes1);
+        if (sptr2 && sbytes2) AmplifyBuffer(sptr2, sbytes2);
+    }
+
+    IDirectSoundBuffer_Unlock(pDSBuf, fptr1, fbytes1, fptr2, fbytes2);
+
+    if (surround) {
+        IDirectSoundBuffer_Unlock(pDSBufCenter, cptr1, cbytes1, cptr2, cbytes2);
+        IDirectSoundBuffer_Unlock(pDSBufSurround, sptr1, sbytes1, sptr2, sbytes2);
+    }
+
+    DSWriteCursor = (DSWriteCursor + fbytes1 + fbytes2) % DS_BUFFER_SIZE;
 }
 
 int XboxDSDrv_PCM_BeginPlayback(char *BufferStart, int BufferSize,
@@ -426,7 +523,7 @@ int XboxDSDrv_PCM_BeginPlayback(char *BufferStart, int BufferSize,
         }
     }
 
-    /* Start looping playback */
+    /* Start looping playback on all buffers */
     hr = IDirectSoundBuffer_Play(pDSBuf, 0, 0, DSBPLAY_LOOPING);
     if (FAILED(hr)) {
         xbox_log("XboxDS: Play FAILED hr=0x%08X\n", (unsigned)hr);
@@ -434,9 +531,32 @@ int XboxDSDrv_PCM_BeginPlayback(char *BufferStart, int BufferSize,
         return XDS_Err_Error;
     }
 
+    if (pDSBufCenter) {
+        IDirectSoundBuffer_Play(pDSBufCenter, 0, 0, DSBPLAY_LOOPING);
+    }
+    if (pDSBufSurround) {
+        IDirectSoundBuffer_Play(pDSBufSurround, 0, 0, DSBPLAY_LOOPING);
+    }
+
     Playing = 1;
-    xbox_log("XboxDS: Play started, looping\n");
+    xbox_log("XboxDS: Play started, looping (surround=%d)\n",
+        (pDSBufCenter && pDSBufSurround) ? 1 : 0);
     return XDS_Err_Ok;
+}
+
+/* Flush a single DS buffer with silence */
+static void FlushDSBuffer(IDirectSoundBuffer *buf)
+{
+    LPVOID ptr1;
+    DWORD bytes1;
+    HRESULT hr;
+    if (!buf) return;
+    hr = IDirectSoundBuffer_Lock(buf, 0, DS_BUFFER_SIZE,
+        &ptr1, &bytes1, NULL, NULL, DSBLOCK_ENTIREBUFFER);
+    if (SUCCEEDED(hr)) {
+        memset(ptr1, 0, bytes1);
+        IDirectSoundBuffer_Unlock(buf, ptr1, bytes1, NULL, 0);
+    }
 }
 
 void XboxDSDrv_PCM_StopPlayback(void)
@@ -447,20 +567,18 @@ void XboxDSDrv_PCM_StopPlayback(void)
 
     if (pDSBuf) {
         IDirectSoundBuffer_Stop(pDSBuf);
-
-        /* Flush DS buffer with silence so stale PCM doesn't replay on next
-         * scene transition (stats→level, menu→game, animation→menu). */
-        {
-            LPVOID ptr1;
-            DWORD bytes1;
-            HRESULT hr = IDirectSoundBuffer_Lock(pDSBuf, 0, DS_BUFFER_SIZE,
-                &ptr1, &bytes1, NULL, NULL, DSBLOCK_ENTIREBUFFER);
-            if (SUCCEEDED(hr)) {
-                memset(ptr1, 0, bytes1);
-                IDirectSoundBuffer_Unlock(pDSBuf, ptr1, bytes1, NULL, 0);
-            }
-        }
+        FlushDSBuffer(pDSBuf);
         IDirectSoundBuffer_SetCurrentPosition(pDSBuf, 0);
+    }
+    if (pDSBufCenter) {
+        IDirectSoundBuffer_Stop(pDSBufCenter);
+        FlushDSBuffer(pDSBufCenter);
+        IDirectSoundBuffer_SetCurrentPosition(pDSBufCenter, 0);
+    }
+    if (pDSBufSurround) {
+        IDirectSoundBuffer_Stop(pDSBufSurround);
+        FlushDSBuffer(pDSBufSurround);
+        IDirectSoundBuffer_SetCurrentPosition(pDSBufSurround, 0);
     }
 
     DSWriteCursor = 0;
@@ -481,18 +599,11 @@ void XboxDSDrv_PCM_Unlock(void)
  * during scene transitions so stale PCM doesn't replay. */
 void XboxDS_FlushBuffer(void)
 {
-    LPVOID ptr1;
-    DWORD bytes1;
-    HRESULT hr;
-
     if (!Initialised || !pDSBuf) return;
 
-    hr = IDirectSoundBuffer_Lock(pDSBuf, 0, DS_BUFFER_SIZE,
-        &ptr1, &bytes1, NULL, NULL, DSBLOCK_ENTIREBUFFER);
-    if (SUCCEEDED(hr)) {
-        memset(ptr1, 0, bytes1);
-        IDirectSoundBuffer_Unlock(pDSBuf, ptr1, bytes1, NULL, 0);
-    }
+    FlushDSBuffer(pDSBuf);
+    FlushDSBuffer(pDSBufCenter);
+    FlushDSBuffer(pDSBufSurround);
 
     /* Sync our write cursor to the current play position so PumpAudio
      * doesn't bulk-fill the buffer with silence before new sounds trigger. */

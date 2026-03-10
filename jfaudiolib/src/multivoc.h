@@ -120,4 +120,16 @@ int   MV_Init( int soundcard, int * MixRate, int Voices, int * numchannels,
          int * samplebits, void * initdata );
 int   MV_Shutdown( void );
 
+#ifdef _XBOX
+/* 5.1 surround sound support */
+void  MV_SetSurroundMode( int enable );
+int   MV_GetSurroundMode( void );
+void  MV_SetVoiceCenter( int handle, int center );
+void  MV_SetVoiceSurroundSweep( int handle, int enable );
+
+/* Per-division surround output buffers (read by driver after MixCallBack) */
+extern short *MV_CenterMixBuf;
+extern short *MV_SurroundMixBuf;
+#endif
+
 #endif

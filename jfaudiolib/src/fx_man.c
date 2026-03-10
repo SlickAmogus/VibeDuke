@@ -1059,6 +1059,35 @@ void FX_StopRecord
    }
 
 
+#ifdef _XBOX
+/*---------------------------------------------------------------------
+   Function: FX_SetSurroundMode / FX_GetSurroundMode / FX_SetVoiceCenter
+
+   5.1 surround sound support wrappers.
+---------------------------------------------------------------------*/
+
+void FX_SetSurroundMode( int enable )
+   {
+   MV_SetSurroundMode( enable );
+   }
+
+int FX_GetSurroundMode( void )
+   {
+   return MV_GetSurroundMode();
+   }
+
+void FX_SetVoiceCenter( int handle, int center )
+   {
+   MV_SetVoiceCenter( handle, center );
+   }
+
+void FX_SetVoiceSurroundSweep( int handle, int enable )
+   {
+   MV_SetVoiceSurroundSweep( handle, enable );
+   }
+#endif
+
+
 /*---------------------------------------------------------------------
    Function: FX_PlayAuto
 
