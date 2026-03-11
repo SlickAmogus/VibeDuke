@@ -3,7 +3,7 @@
 
 Duke Nukem 3D port for the original Xbox, based on [JFDuke3D](http://www.jonof.id.au/jfduke3d) by Jonathon Fowler. Built using the [nxdk](https://github.com/XboxDev/nxdk) open-source Xbox development kit.
 
-This project was almost entirely vibe coded using Claude. We used JFDuke3D as the base and NXDK to get it working on Xbox. The result is a high performance, direct PC port with features like 720P 60 FPS gameplay, and hardware audio + 5.1 surround sound. 
+This project was almost entirely vibe coded using Claude. We used JFDuke3D as the base and NXDK to get it working on Xbox. The result is a high performance, direct PC port with features like 720P 60 FPS gameplay, and hardware audio with 5.1 surround support. 
 
 ## Features
 
@@ -15,9 +15,9 @@ This project was almost entirely vibe coded using Claude. We used JFDuke3D as th
 - Save/load game support
 - 480i/480p/720p/1080i auto-detection
 
-## Devevelopment Prerequisites
+## Development Prerequisites
 
-- [nxdk](https://github.com/XboxDev/nxdk) installed (default: `/c/Claude/nxdk`, set `NXDK_DIR` to override)
+- [My NXDK Fork](https://github.com/SlickAmogus/nxdk) installed 
 - MSYS2 or Git Bash on Windows
 - GNU Make (MSYS2: `pacman -S make`)
 
@@ -34,7 +34,7 @@ Output: `bin/default.xbe`
 You need a legitimate copy of Duke Nukem 3D or the shareware. Place the following on your Xbox HDD in the same directory as `default.xbe`:
 
 - `DUKE3D.GRP` — Main game data file
-- `music/` — (Optional) OGG Vorbis music files (use `convert_midi_to_ogg.sh` to convert from MIDI). Please note they should be the same name as the MID file, only with OGG extension.
+- `music/` — (Optional) OGG Vorbis music files (use `convert_midi_to_ogg.sh` to convert from MIDI). Please note they should be the same name as the MID file, only with OGG extension. You can extract them from the GRP and different tools are available.
 
 ## Directory Layout
 
@@ -44,6 +44,7 @@ jfbuild/       Build engine (renderer, file I/O, SDL layer)
 jfmact/        Input/control library
 jfaudiolib/    Audio library (mixing, music, sound effects)
 xbox_compat/   Xbox compatibility shims (POSIX I/O, stubs, startup)
+nxdk/          NDDK fork default folder.
 ```
 
 ## License
