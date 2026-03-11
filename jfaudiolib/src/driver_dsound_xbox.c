@@ -56,6 +56,7 @@ static IDirectSound *pDS = NULL;
 static IDirectSoundBuffer *pDSBuf = NULL;         /* Front (FL/FR) - default mixbins */
 static IDirectSoundBuffer *pDSBufCenter = NULL;   /* Center/LFE - custom mixbins */
 static IDirectSoundBuffer *pDSBufSurround = NULL; /* Surround (SL/SR) - custom mixbins */
+static LPAC97MEDIAOBJECT pAc97Digital = NULL;     /* AC97 digital output (keeps AC3 mode alive) */
 
 /* Ring buffer from MultiVoc */
 static char *MixBuffer = NULL;
@@ -261,7 +262,32 @@ int XboxDSDrv_PCM_Init(int *mixrate, int *numchannels, int *samplebits, void *in
         xbox_log("XboxDS: initialized g_DirectSoundCriticalSection\n");
     }
 
-    /* Create DirectSound */
+    /* Set speaker config for 5.1 AC3 output.
+     * RXDK globals (from globals.obj) control what DirectSoundCreate does:
+     *   g_dwDirectSoundOverrideSpeakerConfig — checked first by DirectSoundCreate
+     *   g_dwDirectSoundSpeakerConfig — actual config used by the APU
+     * DirectSoundOverrideSpeakerConfig() strips the AC3 flag (0x10000) — the
+     * GetSpeakerConfig returns 0x2 not 0x10002.  So we also set the globals
+     * directly to ensure the AC3 flag reaches SetupEncodeProcessor, which
+     * calls AC3SetDigitalOutput to program the EP for Dolby Digital. */
+    {
+        extern DWORD g_dwDirectSoundOverrideSpeakerConfig;
+        extern DWORD g_dwDirectSoundSpeakerConfig;
+        DWORD desired = DSSPEAKER_ENABLE_AC3 | DSSPEAKER_SURROUND;  /* 0x10002 */
+
+        /* Call the API first (sets basic layout) */
+        DirectSoundOverrideSpeakerConfig(desired);
+
+        /* Force the AC3 flag into both globals directly */
+        g_dwDirectSoundOverrideSpeakerConfig = desired;
+        g_dwDirectSoundSpeakerConfig = desired;
+
+        xbox_log("XboxDS: Speaker globals set: override=0x%08X config=0x%08X\n",
+            (unsigned)g_dwDirectSoundOverrideSpeakerConfig,
+            (unsigned)g_dwDirectSoundSpeakerConfig);
+    }
+
+    /* Create DirectSound — reads speaker config to load GP/EP programs */
     xbox_log("XboxDS: calling DirectSoundCreate...\n");
     hr = DirectSoundCreate(NULL, &pDS, NULL);
     if (FAILED(hr)) {
@@ -271,13 +297,17 @@ int XboxDSDrv_PCM_Init(int *mixrate, int *numchannels, int *samplebits, void *in
     }
     xbox_log("XboxDS: DirectSoundCreate OK pDS=%p\n", (void *)pDS);
 
-    /* Override speaker config: AC3 encoding only, NO surround matrix.
-     * DSSPEAKER_SURROUND enables Dolby Pro Logic matrix encoding in the GP,
-     * which derives surround from the stereo signal — causing music/effects
-     * to bleed into surround channels.  We do discrete 5.1 via explicit
-     * DSMIXBIN routing, so we only need AC3 encoding for S/PDIF output. */
-    DirectSoundOverrideSpeakerConfig(DSSPEAKER_ENABLE_AC3 | DSSPEAKER_STEREO);
-    xbox_log("XboxDS: Set speaker config STEREO+AC3 (discrete 5.1 via mixbins)\n");
+    /* Check what DirectSoundCreate did to the globals — did AC3 flag survive? */
+    {
+        extern DWORD g_dwDirectSoundOverrideSpeakerConfig;
+        extern DWORD g_dwDirectSoundSpeakerConfig;
+        DWORD speakerConfig = 0;
+        hr = IDirectSound_GetSpeakerConfig(pDS, &speakerConfig);
+        xbox_log("XboxDS: Post-create: GetSpeaker=0x%08X override=0x%08X config=0x%08X\n",
+            (unsigned)speakerConfig,
+            (unsigned)g_dwDirectSoundOverrideSpeakerConfig,
+            (unsigned)g_dwDirectSoundSpeakerConfig);
+    }
 
     /* Set up wave format */
     memset(&wfx, 0, sizeof(wfx));
@@ -418,6 +448,10 @@ void XboxDSDrv_PCM_Shutdown(void)
         XboxDSDrv_PCM_StopPlayback();
     }
 
+    if (pAc97Digital) {
+        XAc97MediaObject_Release(pAc97Digital);
+        pAc97Digital = NULL;
+    }
     if (pDSBufSurround) {
         IDirectSoundBuffer_Release(pDSBufSurround);
         pDSBufSurround = NULL;
