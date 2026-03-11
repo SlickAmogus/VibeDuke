@@ -54,9 +54,9 @@ GPLv2 — see GPL.TXT
 
 ## Support
 
-Join The Chill Lounge discord for questions regarding any of my mods\projects (or feel free to message me):
+Join The Chill Lounge discord for questions regarding any of my mods\projects (or feel free to message me):\
 https://discord.gg/U29t39WR73
 
-If you like what I do: 
+If you like what I do:\
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1F3K8V3B)
 
