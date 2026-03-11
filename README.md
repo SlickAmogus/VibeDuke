@@ -52,3 +52,11 @@ nxdk/          NDDK fork default folder.
 GPLv2 — see GPL.TXT
 
 
+## Support
+
+Join The Chill Lounge on Discord:
+https://discord.gg/U29t39WR73
+
+If you like what I do:
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1F3K8V3B)
+
