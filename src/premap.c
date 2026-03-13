@@ -34,11 +34,7 @@ extern void xbox_log(const char *fmt, ...);
 extern unsigned char pow2char[];
 
 static short which_palookup = 9;
-#ifdef _XBOX
-unsigned char useprecache = 0;  // Xbox: disabled — 64MB unified RAM can't hold all level textures at once
-#else
 unsigned char useprecache = 1;
-#endif
 
 static void tloadtile(short tilenume, char type)
 {
@@ -236,6 +232,7 @@ void cachegoodsprites(void)
     for( i = SMALLSMOKE; i < (SMALLSMOKE+4); i++) tloadtile(i,1);
 
     for( i = JIBS1; i < (JIBS5+5); i++) tloadtile(i,1);
+    for( i = JIBS6; i < (JIBS6+8); i++) tloadtile(i,1);
     for( i = SCRAP1; i < (SCRAP1+19); i++) tloadtile(i,1);
 
     for (i=RPG; i<RPG+7; i++) tloadtile(i,1);
@@ -244,6 +241,36 @@ void cachegoodsprites(void)
     for (i=GROWSPARK; i<GROWSPARK+4; i++) tloadtile(i,1);
     for (i=SHRINKEREXPLOSION; i<SHRINKEREXPLOSION+4; i++) tloadtile(i,1);
     for (i=MORTER; i<MORTER+4; i++) tloadtile(i,4);
+
+    /* Explosions */
+    for (i=COOLEXPLOSION1; i<COOLEXPLOSION1+21; i++) tloadtile(i,1);
+    tloadtile(EXPLOSION2BOT,1);
+    tloadtile(RADIUSEXPLOSION,1);
+
+    /* Projectiles */
+    for (i=FIRELASER; i<FIRELASER+4; i++) tloadtile(i,1);
+    for (i=SPIT; i<SPIT+4; i++) tloadtile(i,1);
+    tloadtile(SHOTSPARK1,1);
+    for (i=TRANSPORTERSTAR; i<TRANSPORTERSTAR+6; i++) tloadtile(i,1);
+
+    /* Blood and gibs */
+    for (i=BLOOD; i<BLOOD+4; i++) tloadtile(i,1);
+    tloadtile(BLOODPOOL,1);
+    for (i=BLOODSPLAT1; i<=BLOODSPLAT4; i++) tloadtile(i,1);
+    for (i=WALLBLOOD1; i<=WALLBLOOD8; i++) tloadtile(i,1);
+
+    /* Enemy body part gibs */
+    for (i=HEADJIB1; i<HEADJIB1+4; i++) tloadtile(i,1);
+    for (i=ARMJIB1; i<ARMJIB1+4; i++) tloadtile(i,1);
+    for (i=LEGJIB1; i<LEGJIB1+4; i++) tloadtile(i,1);
+    for (i=LIZMANHEAD1; i<LIZMANHEAD1+4; i++) tloadtile(i,1);
+    for (i=LIZMANARM1; i<LIZMANARM1+4; i++) tloadtile(i,1);
+    for (i=LIZMANLEG1; i<LIZMANLEG1+4; i++) tloadtile(i,1);
+    tloadtile(DUKETORSO,1);
+    tloadtile(DUKELEG,1);
+
+    /* Common effects */
+    tloadtile(WATERBUBBLE,1);
 }
 
 char getsound(unsigned short num)

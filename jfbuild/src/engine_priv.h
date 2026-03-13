@@ -35,6 +35,7 @@ extern int searchx, searchy;
 extern short searchsector, searchwall, searchstat;
 
 extern char inpreparemirror;
+extern int polymost_nextcall_nocolorclear;
 
 extern int curbrightness;
 extern float curgamma;

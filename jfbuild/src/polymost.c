@@ -101,6 +101,7 @@ double dxb1[MAXWALLSB], dxb2[MAXWALLSB];
 #define FOGSCALE 0.0000384
 
 double gxyaspect, grhalfxdown10x;
+int polymost_nextcall_nocolorclear = 0; // Set to 1 to skip color clear in next polymost_drawrooms
 static double gyxscale, gviewxrange, ghalfx, grhalfxdown10, ghoriz;
 double gcosang, gsinang, gcosang2, gsinang2;
 double gchang, gshang, gctang, gstang;
@@ -3012,7 +3013,12 @@ void polymost_drawrooms (void)
 	{
 		resizeglcheck();
 
-		glfunc.glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+		if (polymost_nextcall_nocolorclear) {
+			glfunc.glClear(GL_DEPTH_BUFFER_BIT);
+			polymost_nextcall_nocolorclear = 0;
+		} else {
+			glfunc.glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+		}
 		glfunc.glEnable(GL_DEPTH_TEST);
 		glfunc.glDepthFunc(GL_ALWAYS); //NEVER,LESS,(,L)EQUAL,GREATER,(NOT,G)EQUAL,ALWAYS
 

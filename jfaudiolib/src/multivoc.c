@@ -2219,8 +2219,8 @@ int MV_Pan3D
 
 #ifdef _XBOX
    /* After SetPan sets the base stereo volumes, override with 5.1 panning.
-    * Angle 0-31: 0=front, 8=right, 16=behind, 24=left.
-    * We distribute the sound across FL/FR/SL/SR based on quadrant. */
+    * Game angle 0-31: 0=behind, 8=right, 16=ahead, 24=left.
+    * We remap to surround convention then distribute across FL/FR/SL/SR. */
    if ( MV_SurroundMode && status == MV_Ok )
       {
       VoiceNode *voice = MV_GetVoice( handle );
@@ -2230,29 +2230,31 @@ int MV_Pan3D
          int fl, fr, sl, sr;
 
          /* 4-speaker VBAP panning: compute per-speaker gains.
-          * Angles: 0=front-center, 8=right, 16=back, 24=left.
-          * Front speakers cover angles 0-8 and 24-31.
-          * Surround speakers cover angles 8-24. */
-         if ( angle <= 8 )
+          * Build engine convention: 0=behind, 8=right, 16=ahead, 24=left.
+          * Surround code expects:   0=ahead,  8=right, 16=behind, 24=left.
+          * Reflect front/back (preserve L/R): sa = (48 - angle) & 31 */
+         int sa = ( 48 - angle ) & 31;
+
+         if ( sa <= 8 )
             {
             /* Front-right quadrant (0-8): FL→FR crossfade, no surround */
-            fr = level * angle / 8;
+            fr = level * sa / 8;
             fl = level - fr;
             sl = 0;
             sr = 0;
             }
-         else if ( angle <= 16 )
+         else if ( sa <= 16 )
             {
             /* Right-rear quadrant (8-16): FR→SR crossfade */
-            sr = level * ( angle - 8 ) / 8;
+            sr = level * ( sa - 8 ) / 8;
             fr = level - sr;
             fl = 0;
             sl = 0;
             }
-         else if ( angle <= 24 )
+         else if ( sa <= 24 )
             {
             /* Rear-left quadrant (16-24): SR→SL crossfade */
-            sl = level * ( angle - 16 ) / 8;
+            sl = level * ( sa - 16 ) / 8;
             sr = level - sl;
             fl = 0;
             fr = 0;
@@ -2260,7 +2262,7 @@ int MV_Pan3D
          else
             {
             /* Left-front quadrant (24-31): SL→FL crossfade */
-            fl = level * ( angle - 24 ) / 8;
+            fl = level * ( sa - 24 ) / 8;
             sl = level - fl;
             fr = 0;
             sr = 0;

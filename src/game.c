@@ -3264,6 +3264,14 @@ void displayrooms(short snum,int smoothratio)
                 visibility = j;
             }
             gotpic[MIRROR>>3] &= ~(1<<(MIRROR&7));
+#if USE_POLYMOST && USE_OPENGL
+            {
+                // Tell the next polymost_drawrooms() to preserve the mirror
+                // reflection by skipping the color buffer clear.
+                extern int polymost_nextcall_nocolorclear;
+                polymost_nextcall_nocolorclear = 1;
+            }
+#endif
         }
 
         drawrooms(cposx,cposy,cposz,cang,choriz,sect);
