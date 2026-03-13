@@ -517,14 +517,14 @@ static char * joystickdigitaldefaults_modern[MAXJOYAXES*2] =
 static char * joystickdefaults_xbox[MAXJOYBUTTONS] =
    {
    "Jump",              // A
-   "Crouch",            // B
+   "Inventory",         // B (use item)
    "Open",              // X
-   "Inventory",         // Y (use item)
+   "Crouch",            // Y
    "Map",               // Back
    "",                  // Guide (no physical button on Xbox OG)
    "Show_Menu",         // Start
    "Quick_Kick",        // L stick click
-   "AutoRun",           // R stick click (toggle run)
+   "See_Coop_View",     // R stick click (toggle view mode / F7)
    "Previous_Weapon",   // White (LeftShoulder)
    "Next_Weapon",       // Black (RightShoulder)
    "Jetpack",           // D-pad Up

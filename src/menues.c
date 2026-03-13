@@ -1578,7 +1578,7 @@ void menus(void)
 
                 l = 8;
             } else {
-                l = 3;
+                l = 4;
             }
 
             probe(0,0,0,0);
@@ -1791,6 +1791,22 @@ cheat_for_port_credits:
                    const char credit5[] = "the source code, latest news, and updates of this port.";
                    minitext(160-(sizeof credit4)*2, 135+10+(0*7)-l, credit4, 8, 10+16+128);
                    minitext(160-(sizeof credit5)*2, 135+10+(1*7)-l, credit5, 8, 10+16+128);
+                   break;
+                case 994:
+                   rotatesprite(160<<16,200<<15,65536L,0,MENUSCREEN,0,0,10+64,0,0,xdim-1,ydim-1);
+                   menutext(160,60,0,0,"XBOX PORT");
+
+                   gametext(160,90,"Vibe coded by KushAstronaut",0,2+8+16);
+                   gametext(160,90+9,"using Claude.",0,2+8+16);
+
+                   gametext(160,90+9+9+9,"Based on JFDuke3D PC port and",0,2+8+16);
+                   gametext(160,90+9+9+9+9,"created using NXDK with hardware",0,2+8+16);
+                   gametext(160,90+9+9+9+9+9,"audio support from XDK/RXDK.",0,2+8+16);
+
+                   {
+                   const char xburl[] = "https://github.com/SlickAmogus";
+                   minitext(160-(sizeof xburl)*2, 90+9+9+9+9+9+9+9, xburl, 8, 10+16+128);
+                   }
                    break;
             }
             break;
@@ -3847,7 +3863,32 @@ VOLUME_ALL_40x:
                     rotatesprite(0,0,65536L,0,TEXTSTORY,0,0,10+16+64, 0,0,xdim-1,ydim-1);
                     break;
                 case 401:
-                    rotatesprite(0,0,65536L,0,F1HELP,0,0,10+16+64, 0,0,xdim-1,ydim-1);
+                    rotatesprite(160<<16,200<<15,65536L,0,MENUSCREEN,0,0,10+64,0,0,xdim-1,ydim-1);
+                    menutext(160,24,0,0,"XBOX CONTROLS");
+
+                    gametext(160,36, "BUTTONS",0,2+8+16);
+                    minitext(160-60,36+10, "A = Jump",            0, 10+16+128);
+                    minitext(160-60,36+17, "B = Use Inventory",   0, 10+16+128);
+                    minitext(160-60,36+24, "X = Open / Activate", 0, 10+16+128);
+                    minitext(160-60,36+31, "Y = Crouch",          0, 10+16+128);
+                    minitext(160-60,36+38, "Start = Menu",        0, 10+16+128);
+                    minitext(160-60,36+45, "Back = Map",          0, 10+16+128);
+
+                    gametext(160,88, "STICKS & TRIGGERS",0,2+8+16);
+                    minitext(160-60,88+10, "Left Stick = Move / Strafe",  0, 10+16+128);
+                    minitext(160-60,88+17, "Right Stick = Turn / Look",   0, 10+16+128);
+                    minitext(160-60,88+24, "L Stick Click = Quick Kick",  0, 10+16+128);
+                    minitext(160-60,88+31, "R Stick Click = Third Person", 0, 10+16+128);
+                    minitext(160-60,88+38, "Left Trigger = Walk",          0, 10+16+128);
+                    minitext(160-60,88+45, "Right Trigger = Fire",        0, 10+16+128);
+
+                    gametext(160,140, "SHOULDERS & D-PAD",0,2+8+16);
+                    minitext(160-60,140+10, "White = Prev Weapon",    0, 10+16+128);
+                    minitext(160-60,140+17, "Black = Next Weapon",    0, 10+16+128);
+                    minitext(160-60,140+24, "D-Up = Jetpack",         0, 10+16+128);
+                    minitext(160-60,140+31, "D-Down = MedKit",        0, 10+16+128);
+                    minitext(160-60,140+38, "D-Left = Inventory Left",  0, 10+16+128);
+                    minitext(160-60,140+45, "D-Right = Inventory Right", 0, 10+16+128);
                     break;
             }
 

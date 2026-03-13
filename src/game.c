@@ -2506,7 +2506,36 @@ void displayrest(int smoothratio)
                 rotatesprite(0,0,65536L,0,TEXTSTORY,0,0,10+16+64, 0,0,xdim-1,ydim-1);
                 break;
             case 2:
+#ifdef _XBOX
+                rotatesprite(160<<16,200<<15,65536L,0,MENUSCREEN,0,0,10+64,0,0,xdim-1,ydim-1);
+                menutext(160,24,0,0,"XBOX CONTROLS");
+
+                gametext(160,36, "BUTTONS",0,2+8+16);
+                minitext(160-60,36+10, "A = Jump",            0, 10+16+128);
+                minitext(160-60,36+17, "B = Use Inventory",   0, 10+16+128);
+                minitext(160-60,36+24, "X = Open / Activate", 0, 10+16+128);
+                minitext(160-60,36+31, "Y = Crouch",          0, 10+16+128);
+                minitext(160-60,36+38, "Start = Menu",        0, 10+16+128);
+                minitext(160-60,36+45, "Back = Map",          0, 10+16+128);
+
+                gametext(160,88, "STICKS & TRIGGERS",0,2+8+16);
+                minitext(160-60,88+10, "Left Stick = Move / Strafe",  0, 10+16+128);
+                minitext(160-60,88+17, "Right Stick = Turn / Look",   0, 10+16+128);
+                minitext(160-60,88+24, "L Stick Click = Quick Kick",  0, 10+16+128);
+                minitext(160-60,88+31, "R Stick Click = Third Person", 0, 10+16+128);
+                minitext(160-60,88+38, "Left Trigger = Walk",          0, 10+16+128);
+                minitext(160-60,88+45, "Right Trigger = Fire",        0, 10+16+128);
+
+                gametext(160,140, "SHOULDERS & D-PAD",0,2+8+16);
+                minitext(160-60,140+10, "White = Prev Weapon",    0, 10+16+128);
+                minitext(160-60,140+17, "Black = Next Weapon",    0, 10+16+128);
+                minitext(160-60,140+24, "D-Up = Jetpack",         0, 10+16+128);
+                minitext(160-60,140+31, "D-Down = MedKit",        0, 10+16+128);
+                minitext(160-60,140+38, "D-Left = Inventory Left",  0, 10+16+128);
+                minitext(160-60,140+45, "D-Right = Inventory Right", 0, 10+16+128);
+#else
                 rotatesprite(0,0,65536L,0,F1HELP,0,0,10+16+64, 0,0,xdim-1,ydim-1);
+#endif
                 break;
         }
         if (tintf > 0 || dotint) palto(tintr,tintg,tintb,tintf|128);
@@ -8812,7 +8841,11 @@ corrupt:
 
 void opendemowrite(void)
 {
+#ifdef _XBOX
+    char d[64] = "D:\\demo1.dmo";
+#else
     char *d = "demo1.dmo";
+#endif
     int dummylong = 0;
     char ver;
     short i;
@@ -8821,7 +8854,12 @@ void opendemowrite(void)
 
     ver = BYTEVERSION;
 
-    if ((frecfilep = fopen(d,"wb")) == NULL) return;
+    if ((frecfilep = fopen(d,"wb")) == NULL) {
+        // fopen failed (e.g. read-only filesystem) — disable recording
+        // so record() doesn't write to a NULL file pointer.
+        ud.recstat = ud.m_recstat = 0;
+        return;
+    }
     fwrite(&dummylong,4,1,frecfilep);
     fwrite(&ver,sizeof(char),1,frecfilep);
     fwrite((char *)&ud.volume_number,sizeof(char),1,frecfilep);
@@ -8853,6 +8891,8 @@ void record(void)
 {
     short i;
 
+    if (!frecfilep) { ud.recstat = 0; return; }
+
     for(i=connecthead;i>=0;i=connectpoint2[i])
          {
          copybufbyte(&sync[i],&recsync[ud.reccnt],sizeof(input));
@@ -8874,7 +8914,7 @@ void closedemowrite(void)
         {
             dfwrite(recsync,sizeof(input)*ud.multimode,ud.reccnt/ud.multimode,frecfilep);
 
-            fseek(frecfilep,SEEK_SET,0L);
+            fseek(frecfilep,0L,SEEK_SET);
             fwrite(&totalreccnt,sizeof(int),1,frecfilep);
             ud.recstat = ud.m_recstat = 0;
         }
