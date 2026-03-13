@@ -2418,10 +2418,10 @@ if (!VOLUMEALL) {
         menutext(320>>1,24,0,0,"INPUT SETTINGS");
 
 #ifdef _XBOX
-        c = 46;
+        c = 50;
 
         onbar = (probey < 2) ? 1 : 0;
-        x = probe(160,c,18,3);
+        x = probe(24,c,20,4);
 
         switch (x) {
         case -1:
@@ -2430,6 +2430,10 @@ if (!VOLUMEALL) {
             break;
 
         case 2:
+            ud.mouseflip = 1-ud.mouseflip;
+            break;
+
+        case 3:
             CONFIG_SetJoystickDefaults(2);
             CONFIG_SetXboxJoystickTuning();
             changesmade = 2;
@@ -2437,32 +2441,37 @@ if (!VOLUMEALL) {
         }
 
         /* Right Stick X (axis 2) */
-        menutext(160,c,0,0,"RIGHT STICK X");
-        s = JoystickAnalogueScale[2] >> 11;
+        gametextpal(40,c, "Right Stick X", 0, 2);
+        s = JoystickAnalogueScale[2] >> 9;
         if (s < 0) s = 0; if (s > 63) s = 63;
-        bar(140+56,c+8,&s,1,probey==0,0,0);
-        l = (int)s << 11;
+        bar(206,c+4,&s,1,probey==0,0,0);
+        l = (int)s << 9;
         if (l != JoystickAnalogueScale[2]) {
             CONTROL_SetAnalogAxisScale( 2, l, controldevice_joystick );
             JoystickAnalogueScale[2] = l;
         }
         Bsprintf(buf,"%.2f",(float)l/65536.0);
-        gametext(140,c,buf,0,2+8+16);
+        gametextpal(170,c, buf, 0, 0);
 
         /* Right Stick Y (axis 3) */
-        menutext(160,c+18,0,0,"RIGHT STICK Y");
-        s = JoystickAnalogueScale[3] >> 11;
+        gametextpal(40,c+20, "Right Stick Y", 0, 2);
+        s = JoystickAnalogueScale[3] >> 9;
         if (s < 0) s = 0; if (s > 63) s = 63;
-        bar(140+56,c+18+8,&s,1,probey==1,0,0);
-        l = (int)s << 11;
+        bar(206,c+20+4,&s,1,probey==1,0,0);
+        l = (int)s << 9;
         if (l != JoystickAnalogueScale[3]) {
             CONTROL_SetAnalogAxisScale( 3, l, controldevice_joystick );
             JoystickAnalogueScale[3] = l;
         }
         Bsprintf(buf,"%.2f",(float)l/65536.0);
-        gametext(140,c+18,buf,0,2+8+16);
+        gametextpal(170,c+20, buf, 0, 0);
 
-        menutext(160,c+18+18+9, 0,0,"RESET DEFAULTS");
+        /* Invert Look */
+        gametextpal(40,c+20+20, "Invert Look", 0, 2);
+        gametextpal(170,c+20+20, ud.mouseflip ? "Off" : "On", 0, 0);
+
+        /* Reset Defaults */
+        gametextpal(40,c+20+20+20, "Reset Defaults", 0, 2);
         if (changesmade == 2)
             gametext(160,158,"Defaults applied",0,2+8+16);
 #else
