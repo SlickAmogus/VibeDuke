@@ -1185,6 +1185,13 @@ void movefx(void)
 
                 ht = s->hitag;
 
+                /* Don't trigger ambient sounds while paused or in menu.
+                 * During demo playback, moveloop() runs even with MODE_MENU
+                 * set, which would re-trigger sounds immediately after
+                 * FX_StopAllSounds() killed them on menu entry. */
+                if(ud.pause_on || (ps[myconnectindex].gm & MODE_MENU))
+                    break;
+
                 if(T2 != SoundToggle)
                 {
                     T2 = SoundToggle;
