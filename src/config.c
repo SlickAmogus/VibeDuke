@@ -567,12 +567,6 @@ void CONFIG_SetupJoystick( void )
 
    if (scripthandle < 0) return;
 
-#ifdef _XBOX
-   /* On Xbox, always use compiled-in defaults from joystickdefaults_xbox[].
-    * Skip reading saved config so updated defaults take effect immediately. */
-   CONFIG_SetJoystickDefaults(2);
-   CONFIG_SetXboxJoystickTuning();
-#else
    for (i=0;i<MAXJOYBUTTONS;i++)
       {
       Bsprintf(str,"JoystickButton%d",i);
@@ -614,7 +608,6 @@ void CONFIG_SetupJoystick( void )
       SCRIPT_GetNumber(scripthandle, "Controls", str,&scale);
       JoystickAnalogueSaturate[i] = scale;
       }
-#endif /* !_XBOX */
 
    for (i=0;i<MAXJOYBUTTONS;i++)
       {

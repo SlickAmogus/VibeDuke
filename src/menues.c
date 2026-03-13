@@ -2418,16 +2418,10 @@ if (!VOLUMEALL) {
         menutext(320>>1,24,0,0,"INPUT SETTINGS");
 
 #ifdef _XBOX
-        c = (200 - 18*4)>>1;
+        c = 46;
 
-        onbar = 0;
-        {
-            const int keys[] = {sc_K, sc_M, sc_C, sc_V, 0};
-            if (probey >= 3)
-                x = probekeys(160,c+9,18,4,keys);
-            else
-                x = probekeys(160,c,18,4,keys);
-        }
+        onbar = (probey < 2) ? 1 : 0;
+        x = probe(160,c,18,3);
 
         switch (x) {
         case -1:
@@ -2435,30 +2429,42 @@ if (!VOLUMEALL) {
             probey = 3;
             break;
 
-        case 0:
-            currentlist = 0;
-            // fall through
-        case 1:
         case 2:
-            if (x==2 && !CONTROL_JoyPresent) break;
-            cmenu(204+x);
-            break;
-
-        case 3:
-            CONFIG_SetDefaultKeyDefinitions(CONFIG_DEFAULTS_MODERN);
-            CONFIG_SetMouseDefaults(CONFIG_DEFAULTS_MODERN);
             CONFIG_SetJoystickDefaults(2);
             CONFIG_SetXboxJoystickTuning();
             changesmade = 2;
             break;
         }
 
-        menutext(160,c,         0,0,"KEYS SETUP");
-        menutext(160,c+18,      0,0,"MOUSE SETUP");
-        menutext(160,c+18+18,   0,CONTROL_JoyPresent==0,"CONTROLLER SETUP");
-        menutext(160,c+18+18+18+9, 0,0,"VIBEDUKE DEFAULTS");
+        /* Right Stick X (axis 2) */
+        menutext(160,c,0,0,"RIGHT STICK X");
+        s = JoystickAnalogueScale[2] >> 11;
+        if (s < 0) s = 0; if (s > 63) s = 63;
+        bar(140+56,c+8,&s,1,probey==0,0,0);
+        l = (int)s << 11;
+        if (l != JoystickAnalogueScale[2]) {
+            CONTROL_SetAnalogAxisScale( 2, l, controldevice_joystick );
+            JoystickAnalogueScale[2] = l;
+        }
+        Bsprintf(buf,"%.2f",(float)l/65536.0);
+        gametext(140,c,buf,0,2+8+16);
+
+        /* Right Stick Y (axis 3) */
+        menutext(160,c+18,0,0,"RIGHT STICK Y");
+        s = JoystickAnalogueScale[3] >> 11;
+        if (s < 0) s = 0; if (s > 63) s = 63;
+        bar(140+56,c+18+8,&s,1,probey==1,0,0);
+        l = (int)s << 11;
+        if (l != JoystickAnalogueScale[3]) {
+            CONTROL_SetAnalogAxisScale( 3, l, controldevice_joystick );
+            JoystickAnalogueScale[3] = l;
+        }
+        Bsprintf(buf,"%.2f",(float)l/65536.0);
+        gametext(140,c+18,buf,0,2+8+16);
+
+        menutext(160,c+18+18+9, 0,0,"RESET DEFAULTS");
         if (changesmade == 2)
-            gametext(160,158,"VibeDuke defaults applied",0,2+8+16);
+            gametext(160,158,"Defaults applied",0,2+8+16);
 #else
         c = (200 - 18*5)>>1;
 
