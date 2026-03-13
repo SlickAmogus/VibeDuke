@@ -6856,12 +6856,27 @@ void nonsharedkeys(void)
 
     if( ps[myconnectindex].cheat_phase == 1 || (ps[myconnectindex].gm&(MODE_MENU|MODE_TYPE))) return;
 
-    if( BUTTON(gamefunc_See_Coop_View) && ( ud.coop == 1 || ud.recstat == 2) )
+    if( BUTTON(gamefunc_See_Coop_View) )
     {
         CONTROL_ClearButton( gamefunc_See_Coop_View );
-        screenpeek = connectpoint2[screenpeek];
-        if(screenpeek == -1) screenpeek = connecthead;
-        restorepalette = 1;
+        if( ud.coop == 1 || ud.recstat == 2 )
+        {
+            screenpeek = connectpoint2[screenpeek];
+            if(screenpeek == -1) screenpeek = connecthead;
+            restorepalette = 1;
+        }
+        else
+        {
+            if( ps[myconnectindex].over_shoulder_on )
+                ps[myconnectindex].over_shoulder_on = 0;
+            else
+            {
+                ps[myconnectindex].over_shoulder_on = 1;
+                cameradist = 0;
+                cameraclock = totalclock;
+            }
+            FTA(109+ps[myconnectindex].over_shoulder_on,&ps[myconnectindex]);
+        }
     }
 
     if( ud.multimode > 1 && BUTTON(gamefunc_Show_Opponents_Weapon) )
