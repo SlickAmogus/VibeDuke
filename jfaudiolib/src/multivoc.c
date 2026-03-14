@@ -642,7 +642,7 @@ static void MV_ServiceVoc
       VoiceNode *v;
       svc_count++;
       for (v = VoiceList.next; v != &VoiceList; v = v->next) vcount++;
-      if (svc_count <= 10 || (svc_count % 500 == 0) || (vcount > 0 && svc_count <= 100))
+      if (svc_count <= 10)
          xbox_log("MV_ServiceVoc #%d: voices=%d page=%d\n", svc_count, vcount, MV_MixPage);
    }
 #endif
@@ -652,8 +652,7 @@ static void MV_ServiceVoc
    {
       static int apu_diag_count = 0;
       apu_diag_count++;
-      if (apu_diag_count == 1 || apu_diag_count == 50 || apu_diag_count == 500
-          || (apu_diag_count % 3000 == 0))
+      if (apu_diag_count == 1)
          {
          char diag[16384];
          int diag_len = XApuDiagnostic(diag, sizeof(diag));

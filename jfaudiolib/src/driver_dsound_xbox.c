@@ -548,7 +548,7 @@ static void PumpAudio(void)
     if (writeBytes < 1024) return;
     writeBytes -= 512;
 
-    if (PumpCallCount <= 5 || (PumpCallCount % 200 == 0)) {
+    if (PumpCallCount <= 5) {
         xbox_log("XboxDS: Pump#%d play=%u ours=%u avail=%u surr=%d\n",
             PumpCallCount, (unsigned)playCursor,
             (unsigned)DSWriteCursor, (unsigned)writeBytes, surround);

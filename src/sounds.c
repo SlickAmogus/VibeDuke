@@ -92,6 +92,100 @@ static int IsCenterChannelSound(short num)
         case DUKE_CRACK:
         case DUKE_CRACK2:
         case DUKE_CRACK_FIRST:
+        /* Duke one-liner voice quotes (entrance, kills, reactions) */
+        case DUKE_GLAD:
+        case DUKE_YES:
+        case DUKE_HEHE:
+        case DUKE_SHUCKS:
+        case DUKETALKTOBOSS:
+        case DUKE_TIP1:
+        case DUKE_TIP2:
+        case DUKE_KILLED1:
+        case DUKE_KILLED2:
+        case DUKE_KILLED3:
+        case DUKE_KILLED4:
+        case DUKE_KILLED5:
+        case DUKE_GETWEAPON1:
+        case DUKE_GETWEAPON2:
+        case DUKE_GETWEAPON3:
+        case DUKE_GETWEAPON4:
+        case DUKE_GETWEAPON6:
+        case DUKE_SEARCH:
+        case DUKE_SEARCH2:
+        case DUKE_GET:
+        case DUKE_HIT_STRIPPER1:
+        case DUKE_HIT_STRIPPER2:
+        case DUKE_GOTHEALTHATLOW:
+        case DUKE_BOOBY:
+        case DUKE_TALKTOBOSSFALL:
+        case DUKE_LOOKINTOMIRROR:
+        case DUKE_LONGTERM_PAIN:
+        case DUKE_LONGTERM_PAIN2:
+        case DUKE_LONGTERM_PAIN3:
+        case DUKE_LONGTERM_PAIN4:
+        case DUKE_LONGTERM_PAIN5:
+        case DUKE_LONGTERM_PAIN6:
+        case DUKE_LONGTERM_PAIN7:
+        case DUKE_LONGTERM_PAIN8:
+        /* JIBBED_ACTOR sounds are Duke reaction quotes (misleading name) */
+        case JIBBED_ACTOR1:
+        case JIBBED_ACTOR2:
+        case JIBBED_ACTOR3:
+        case JIBBED_ACTOR4:
+        case JIBBED_ACTOR5:
+        case JIBBED_ACTOR6:
+        case JIBBED_ACTOR7:
+        case JIBBED_ACTOR8:
+        case JIBBED_ACTOR9:
+        case JIBBED_ACTOR10:
+        case JIBBED_ACTOR11:
+        case JIBBED_ACTOR12:
+        case JIBBED_ACTOR13:
+        case JIBBED_ACTOR14:
+        case JIBBED_ACTOR15:
+        /* Bonus / end-of-episode speech */
+        case BONUS_SPEECH1:
+        case BONUS_SPEECH2:
+        case BONUS_SPEECH3:
+        case BONUS_SPEECH4:
+        /* Episode 4 Duke speeches */
+        case BOSS4_DEADSPEECH:
+        case BOSS4_FIRSTSEE:
+        case PARTY_SPEECH:
+        case POSTAL_SPEECH:
+        case TGSPEECH:
+        case DOGROOMSPEECH:
+        case MDEVSPEECH:
+        case AREA51SPEECH:
+        case SNAKESPEECH:
+        /* End-sequence narration */
+        case ENDSEQVOL3SND2:
+        case ENDSEQVOL3SND3:
+        case ENDSEQVOL3SND4:
+        case ENDSEQVOL3SND5:
+        case ENDSEQVOL3SND6:
+        case ENDSEQVOL3SND7:
+        case ENDSEQVOL3SND8:
+        case ENDSEQVOL3SND9:
+        case ENDSEQVOL2SND1:
+        case ENDSEQVOL2SND2:
+        case ENDSEQVOL2SND3:
+        case ENDSEQVOL2SND4:
+        case ENDSEQVOL2SND5:
+        case ENDSEQVOL2SND6:
+        case ENDSEQVOL2SND7:
+        case VOL4ENDSND1:
+        case VOL4ENDSND2:
+        /* Other Duke voice lines */
+        case WHIPYOURASS:
+        case SOMETHINGFROZE:
+        case ILLBEBACK:
+        case GETBACKTOWORK:
+        case BOOKEM:
+        case MAKEMYDAY:
+        case WITNESSSTAND:
+        case VACATIONSPEECH:
+        case YIPPEE1:
             return 1;
         default:
             return 0;
@@ -512,6 +606,26 @@ void stopmusic(void)
        MusicLen = 0;
     }
 }
+
+#ifdef _XBOX
+/* Check if music should be playing but isn't, and restart it.
+ * Called from the game loop to recover from any unexpected music stoppage. */
+void xbox_check_music(void)
+{
+    if (MusicToggle == 0 || MusicDevice < 0) return;
+
+    /* If we have a waveform voice, check that it's still active */
+    if (MusicIsWaveform && MusicVoice >= 0) {
+        if (!FX_SoundActive(MusicVoice)) {
+            /* Music voice died unexpectedly — restart */
+            MusicVoice = -1;
+            if (MusicPtr) { free(MusicPtr); MusicPtr = 0; MusicLen = 0; }
+            MusicIsWaveform = 0;
+            playmusic(&music_fn[0][music_select][0]);
+        }
+    }
+}
+#endif
 
 char loadsound(unsigned short num)
 {

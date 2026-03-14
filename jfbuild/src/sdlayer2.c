@@ -1850,7 +1850,7 @@ int handleevents(void)
 			case SDL_JOYBUTTONDOWN:
 			case SDL_JOYBUTTONUP:
 				if (appactive) {
-					xbox_log("Xbox: JOYBTN btn=%d state=%d\n", ev.jbutton.button, ev.jbutton.state);
+					/* JOYBTN logging disabled — fires on every button press/release */
 					static const int xbox_btn_map[] = {
 						SDL_CONTROLLER_BUTTON_A,
 						SDL_CONTROLLER_BUTTON_B,

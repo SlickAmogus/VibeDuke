@@ -125,7 +125,7 @@ static struct xbox_texture {
 	int alloc_size;      // size in bytes of the contiguous allocation
 } texture_table[MAX_TEXTURES];
 static int total_texture_bytes = 0;  // total contiguous memory allocated for textures
-#define TEX_BUDGET_BYTES (6 * 1024 * 1024)  // proactive eviction threshold
+#define TEX_BUDGET_BYTES (12 * 1024 * 1024)  // proactive eviction threshold (was 6MB, raised to reduce thrashing)
 
 // Free list for recycling texture IDs deleted via glDeleteTextures.
 // Only explicitly-deleted IDs go here (not LRU-evicted ones), because
@@ -538,7 +538,7 @@ static void xbox_do_frame_start(void)
 
 	// Per-frame draw stats (log first 60 frames only — periodic logging
 	// causes disk I/O stalls that produce visible hitching every few seconds)
-	if (frame_number > 0 && frame_number <= 60) {
+	if (frame_number > 0 && frame_number <= 3) {
 		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d 2d=%d depthoff=%d tex=%d vbo=%d stskip=%d\n",
 			frame_number - 1, frame_draw_count, frame_skip_count, frame_clip_count,
 			frame_2d_count, frame_depthoff_count,
@@ -974,7 +974,7 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 			texture_table[lru_id].allocated = 0;
 			proactive_evicted++;
 		}
-		if (proactive_evicted > 0) {
+		if (0) { /* proactive eviction logging disabled — fires every frame, causes HDD I/O hitching */
 			xbox_log("Xbox: proactive eviction: freed %d textures, total=%d budget=%d\n",
 				proactive_evicted, total_texture_bytes, TEX_BUDGET_BYTES);
 		}
@@ -1022,13 +1022,17 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 				tex->addr = MmAllocateContiguousMemoryEx(alloc_size, 0, MAXRAM, 0,
 					PAGE_READWRITE | PAGE_WRITECOMBINE);
 			}
-			if (evicted > 0) {
+			if (0) { /* tex eviction logging disabled */
 				xbox_log("Xbox: tex evicted %d LRU textures to alloc %dx%d (%d bytes), result=%p total=%d\n",
 					evicted, aw, ah, alloc_size, tex->addr, total_texture_bytes);
 			}
 			if (!tex->addr) {
-				xbox_log("Xbox: tex alloc FAILED %dx%d (%d bytes) total=%d\n",
-					aw, ah, alloc_size, total_texture_bytes);
+				/* Only log first few alloc failures to avoid flooding during precache */
+				static int alloc_fail_count = 0;
+				if (alloc_fail_count < 3)
+					xbox_log("Xbox: tex alloc FAILED %dx%d (%d bytes) total=%d\n",
+						aw, ah, alloc_size, total_texture_bytes);
+				alloc_fail_count++;
 				return;
 			}
 		}
@@ -1823,8 +1827,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 	// resets pb_Put back to pb_Head, giving us a fresh 512KB.
 	// Theoretical limit ~1700 draws; threshold provides safety margin.
 	if (++draw_since_sync >= 1500) {
-		xbox_log("Xbox: mid-frame pb_reset at %d draws (frame %d)\n",
-			draw_since_sync, global_frame_num);
+		/* mid-frame pb_reset logging disabled — normal at high draw counts */
 		pb_reset();
 		draw_since_sync = 0;
 	}

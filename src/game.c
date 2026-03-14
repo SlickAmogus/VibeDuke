@@ -8756,6 +8756,11 @@ if (!VOLUMEALL) {
         cheats();
 #ifdef _XBOX
         xbox_cheats();
+        /* Music watchdog: restart music if it died unexpectedly */
+        if (ps[myconnectindex].gm & MODE_GAME) {
+            extern void xbox_check_music(void);
+            xbox_check_music();
+        }
 #endif
         nonsharedkeys();
 
