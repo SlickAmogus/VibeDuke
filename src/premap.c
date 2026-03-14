@@ -806,6 +806,7 @@ void resetprestat(short snum,unsigned char g)
     animatecnt              = 0;
     parallaxtype            = 0;
     randomseed              = 17L;
+    srand(17);              /* deterministic C rand() for demo sync */
     ud.pause_on             = 0;
     ud.camerasprite         =-1;
     ud.eog                  = 0;
@@ -1691,7 +1692,7 @@ int enterlevel(unsigned char g)
     }
 
     clearbufbyte(gotpic,sizeof(gotpic),0L);
-    //clearbufbyte(hittype,sizeof(hitpic),0l); // JBF 20040531: yes? no?
+    clearbufbyte(hittype,sizeof(hittype),0L);
 
     prelevel(g);
 

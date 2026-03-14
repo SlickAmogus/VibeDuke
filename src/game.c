@@ -8254,10 +8254,27 @@ int app_main(int argc, char const * const argv[])
     configloaded = CONFIG_ReadSetup();
 
 #ifdef _XBOX
-    /* Apply display resolution from config (or default 640x480).
+    /* Apply display resolution from config.
      * xbox_startup.c set 640x480 as a safe fallback before main();
      * now switch to the user's configured resolution and rebuild
-     * the valid mode list so polymost uses the right dimensions. */
+     * the valid mode list so polymost uses the right dimensions.
+     * xbox_res_mode: 0=480p, 1=720p(480p upscaled), 2=720p.
+     * DisplayWidth/Height = physical AV output (set by CONFIG_ReadSetup).
+     * ScreenWidth/Height  = render resolution  (set by CONFIG_ReadSetup). */
+    {
+        extern int32 xbox_res_mode;
+        /* If SD-only cable (composite/s-video/scart), force 480p */
+        DWORD enc = XVideoGetEncoderSettings();
+        DWORD cable = enc & 0xFF;
+        if (cable != 4 && cable != 5) { /* not HDTV, not VGA */
+            xbox_log("DUKE3D: SD cable detected (type=%lu), forcing 480i\n", cable);
+            xbox_res_mode = 0;
+            DisplayWidth = 640; DisplayHeight = 480;
+            ScreenWidth = 640;  ScreenHeight = 480;
+        }
+        xbox_log("DUKE3D: xbox_res_mode=%d Display=%dx%d Screen=%dx%d\n",
+            xbox_res_mode, DisplayWidth, DisplayHeight, ScreenWidth, ScreenHeight);
+    }
     XVideoSetMode(DisplayWidth, DisplayHeight, 32, REFRESH_DEFAULT);
     validmodecnt = 0;
     getvalidmodes();

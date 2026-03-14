@@ -56,6 +56,7 @@ extern int32 ForceSetup;
 #ifdef _XBOX
 extern int32 DisplayWidth;
 extern int32 DisplayHeight;
+extern int32 xbox_res_mode;
 #endif
 
 extern byte KeyboardKeys[NUMGAMEFUNCTIONS][2];

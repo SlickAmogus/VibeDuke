@@ -836,9 +836,17 @@ void getvalidmodes(void)
 			}
 		}
 #if USE_POLYMOST && USE_OPENGL
-		/* Single 32bpp mode at the physical display resolution */
+		/* 32bpp mode at the physical display resolution */
 		addvalidmode(maxw, maxh, 32, 1, 0, 60, -1);
 		xbox_log("Xbox getvalidmodes: added 32bpp %dx%d (physical)\n", maxw, maxh);
+		/* If display is 720p+, also add 854x480 32bpp for upscaled mode
+		 * (16:9 at 480p height, scales ~1.5x to 1280x720) */
+		if (maxw > 854 && maxh > 480) {
+			addvalidmode(854, 480, 32, 1, 0, 60, -1);
+			xbox_log("Xbox getvalidmodes: added 32bpp 854x480 (upscaled)\n");
+		}
+		/* 1080i not supported: pbkit triple-buffering at 1920x1080x32bpp
+		 * needs ~24MB contiguous RAM, exceeding Xbox 64MB capacity. */
 #endif
 		sortvalidmodes();
 	}
@@ -957,8 +965,10 @@ int setvideomode(int xdim, int ydim, int bitspp, int fullsc)
 	display = 0;
 	fullsc = 0;  /* windowed — Xbox has no window manager, SDL handles display directly */
 
-	if (sdl_window && sdl_renderer) {
-		/* Window already exists — can't destroy and recreate on Xbox. */
+	if (sdl_window) {
+		/* Window already exists — can't destroy and recreate on Xbox.
+		 * Note: sdl_renderer may be NULL if we booted into 32bpp polymost
+		 * mode (renderer is only created for 8bpp software mode). */
 		if (baselayer_videomodewillchange) baselayer_videomodewillchange();
 
 		if (bitspp > 8) {
@@ -2055,3 +2065,15 @@ static int set_glswapinterval(const osdfuncparm_t *parm)
 	return OSDCMD_OK;
 }
 #endif
+
+//
+// joyRumble() -- trigger controller vibration
+//   low_freq/high_freq: 0-65535 intensity, duration_ms: milliseconds
+//
+void joyRumble(int low_freq, int high_freq, int duration_ms)
+{
+	if (controller) {
+		SDL_GameControllerRumble(controller,
+			(Uint16)low_freq, (Uint16)high_freq, (Uint32)duration_ms);
+	}
+}

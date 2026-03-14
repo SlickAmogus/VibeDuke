@@ -95,6 +95,7 @@ int32 ForceSetup = 1;
 #ifdef _XBOX
 int32 DisplayWidth = 1280;
 int32 DisplayHeight = 720;
+int32 xbox_res_mode = 1;   /* 0=480p, 1=720p(480p upscaled), 2=720p */
 #endif
 
 #ifdef _XBOX
@@ -674,8 +675,33 @@ int32 CONFIG_ReadSetup( void )
     if (ScreenBPP < 8) ScreenBPP = 8;
 
 #ifdef _XBOX
-    SCRIPT_GetNumber( scripthandle, "Screen Setup", "DisplayWidth", &DisplayWidth);
-    SCRIPT_GetNumber( scripthandle, "Screen Setup", "DisplayHeight", &DisplayHeight);
+    SCRIPT_GetNumber( scripthandle, "Screen Setup", "XboxResMode", &xbox_res_mode);
+    if (xbox_res_mode < 0 || xbox_res_mode > 2) xbox_res_mode = 1;
+    /* Derive Display and Screen dimensions from res mode.
+     * Note: 1080i is not supported — pbkit triple-buffering at 1920x1080x32bpp
+     * requires ~24MB contiguous RAM, exceeding what's available on 64MB Xbox. */
+    switch (xbox_res_mode) {
+    case 0: /* 480p */
+        DisplayWidth = 640; DisplayHeight = 480;
+        ScreenWidth = 640; ScreenHeight = 480;
+        break;
+    default: /* 720p (480p upscaled) — render 854x480 16:9, stretched to 1280x720 */
+    case 1:
+        DisplayWidth = 1280; DisplayHeight = 720;
+        ScreenWidth = 854; ScreenHeight = 480;
+        break;
+    case 2: /* 720p native */
+        DisplayWidth = 1280; DisplayHeight = 720;
+        ScreenWidth = 1280; ScreenHeight = 720;
+        break;
+    }
+    ScreenBPP = 32;
+    {
+        extern int xbox_vibration;
+        int32 vib = xbox_vibration;
+        SCRIPT_GetNumber( scripthandle, "Misc", "XboxVibration", &vib);
+        xbox_vibration = vib;
+    }
 #endif
 
     int32 tmpmaxrefreshfreq = 0;
@@ -779,8 +805,11 @@ void CONFIG_WriteSetup( void )
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "ScreenDisplay",ScreenDisplay,false,false);
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "ScreenBPP",ScreenBPP,false,false);
 #ifdef _XBOX
-    SCRIPT_PutNumber( scripthandle, "Screen Setup", "DisplayWidth",DisplayWidth,false,false);
-    SCRIPT_PutNumber( scripthandle, "Screen Setup", "DisplayHeight",DisplayHeight,false,false);
+    SCRIPT_PutNumber( scripthandle, "Screen Setup", "XboxResMode",xbox_res_mode,false,false);
+    {
+        extern int xbox_vibration;
+        SCRIPT_PutNumber( scripthandle, "Misc", "XboxVibration",xbox_vibration,false,false);
+    }
 #endif
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "MaxRefreshFreq",max(0,(int)getmaxrefreshfreq()),false,false);
 #if USE_POLYMOST && USE_OPENGL

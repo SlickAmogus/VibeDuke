@@ -31,6 +31,9 @@ Modifications for JonoF's port by Jonathon Fowler (jf@jonof.id.au)
 #include "osd.h"
 #include <sys/stat.h>
 #include <assert.h>
+#ifdef _XBOX
+#include <hal/video.h>
+#endif
 
 
 struct savehead {
@@ -55,6 +58,12 @@ static int currentlist=0;
 
 static int function, whichkey;
 static int changesmade, newvidmode = -1, curvidmode = -1;
+
+#ifdef _XBOX
+static int xbox_res_pending = -1; /* pending resolution mode in video menu */
+static int xbox_apply_msg = 0;    /* 0=none, 1=no change, 2=saved (restart needed) */
+static int xbox_sd_only = -1;     /* 1=composite/SD cable, resolution locked to 480p */
+#endif
 
 static const char *mousebuttonnames[] = { "Left", "Right", "Middle", "Thumb", "Wheel Down", "Wheel Up" };
 
@@ -2418,10 +2427,12 @@ if (!VOLUMEALL) {
         menutext(320>>1,24,0,0,"INPUT SETTINGS");
 
 #ifdef _XBOX
+        {
+        extern int xbox_vibration;
         c = 50;
 
         onbar = (probey < 2) ? 1 : 0;
-        x = probe(24,c,20,4);
+        x = probe(24,c,20,5);
 
         switch (x) {
         case -1:
@@ -2434,6 +2445,10 @@ if (!VOLUMEALL) {
             break;
 
         case 3:
+            xbox_vibration = 1-xbox_vibration;
+            break;
+
+        case 4:
             CONFIG_SetJoystickDefaults(2);
             CONFIG_SetXboxJoystickTuning();
             changesmade = 2;
@@ -2470,10 +2485,15 @@ if (!VOLUMEALL) {
         gametextpal(40,c+20+20, "Invert Look", 0, 2);
         gametextpal(170,c+20+20, ud.mouseflip ? "Off" : "On", 0, 0);
 
+        /* Vibration */
+        gametextpal(40,c+20+20+20, "Vibration", 0, 2);
+        gametextpal(170,c+20+20+20, xbox_vibration ? "On" : "Off", 0, 0);
+
         /* Reset Defaults */
-        gametextpal(40,c+20+20+20, "Reset Defaults", 0, 2);
+        gametextpal(40,c+20+20+20+20, "Reset Defaults", 0, 2);
         if (changesmade == 2)
-            gametext(160,158,"Defaults applied",0,2+8+16);
+            gametext(160,178,"Defaults applied",0,2+8+16);
+        }
 #else
         c = (200 - 18*5)>>1;
 
@@ -2534,121 +2554,127 @@ if (!VOLUMEALL) {
         {
             c = (320>>1)-120;
 #ifdef _XBOX
-            /* Xbox: Renderer, Resolution, Filtering, Apply, Brightness. */
+            /* Xbox: Resolution, Filtering, Brightness, Apply Changes.
+             * All resolution changes require restart.
+             * Composite cable users are locked to 480p. */
             {
                 extern int xbox_bilinear;
                 extern void xbox_apply_filter(void);
-                const int keys[] = {sc_E, sc_R, sc_F, sc_A, sc_B, 0};
-                i = 5;
-                onbar = (probey == 4);
-                if (probey <= 2)
-                    x = probekeys(c+6,50,16,i,keys);
-                else if (probey == 3)
-                    x = probekeys(c+6,50+16*2+22,0,i,keys);
-                else
-                    x = probekeys(c+6,128-4*16,16,i,keys);
+                extern int32 xbox_res_mode;
+                const char *res_labels[] = {"480P", "720P (480P UPSCALED)", "720P"};
+                const int num_res_modes = 3;
+                int res_disabled; /* 1 = resolution row grayed out (SD cable) */
 
-                if (probey <= 2 && (uinfo.dir == dir_West || uinfo.dir == dir_East)) {
-                    sound(PISTOL_BODYHIT);
-                    x = probey;
+                /* Detect AV cable type once */
+                if (xbox_sd_only < 0) {
+                    DWORD enc = XVideoGetEncoderSettings();
+                    DWORD cable = enc & 0xFF; /* VIDEO_ADAPTER_MASK */
+                    /* AV_PACK_HDTV=4, AV_PACK_VGA=5 support HD modes.
+                     * Everything else (composite, s-video, scart, none) is SD only. */
+                    xbox_sd_only = (cable != 4 && cable != 5) ? 1 : 0;
+                }
+                res_disabled = xbox_sd_only;
+
+                if (xbox_res_pending < 0) xbox_res_pending = xbox_res_mode;
+
+                i = 4;
+                onbar = (probey == 2);
+                x = probekeys(c+6,50,16,i,NULL);
+
+                /* Left/Right on Resolution or Filtering rows */
+                if ((probey == 0 || probey == 1) && (uinfo.dir == dir_West || uinfo.dir == dir_East)) {
+                    if (probey == 0 && res_disabled) {
+                        /* blocked — SD cable, can't change resolution */
+                    } else {
+                        sound(PISTOL_BODYHIT);
+                        x = probey;
+                    }
                 }
 
                 switch (x) {
                     case -1:
                         cmenu(200);
                         probey = 2;
+                        xbox_res_pending = -1;
+                        xbox_apply_msg = 0;
                         break;
 
-                    case 0: // Renderer — toggle Software/Polymost.
-                        {
-                            int curbpp = validmode[newvidmode].bpp;
-                            int newbpp = (curbpp == 8) ? 32 : 8;
-                            int curw = validmode[newvidmode].xdim;
-                            int curh = validmode[newvidmode].ydim;
-                            int best = -1, j;
-                            for (j = 0; j < validmodecnt; j++) {
-                                if (validmode[j].bpp == newbpp) {
-                                    if (best < 0) best = j;
-                                    if (validmode[j].xdim == curw && validmode[j].ydim == curh) {
-                                        best = j;
-                                        break;
-                                    }
-                                }
+                    case 0: /* Resolution — cycle through modes */
+                        if (!res_disabled) {
+                            if (uinfo.dir == dir_East) {
+                                xbox_res_pending = (xbox_res_pending + 1) % num_res_modes;
+                            } else {
+                                xbox_res_pending = (xbox_res_pending + num_res_modes - 1) % num_res_modes;
                             }
-                            if (best >= 0) newvidmode = best;
+                            xbox_apply_msg = 0;
                         }
                         break;
 
-                    case 1: // Resolution — cycle through modes with matching BPP.
-                        // Disable resolution changes in polymost (32bpp) mode.
-                        // Xbox physical display is always 640x480; changing logical
-                        // resolution in polymost breaks the pbkit framebuffer.
-                        if (validmode[newvidmode].bpp != 32) {
-                            int dir = uinfo.dir == dir_West ? -1 : 1;
-                            int curbpp = validmode[newvidmode].bpp;
-                            int mode = newvidmode;
-                            do {
-                                mode += dir;
-                            } while (mode >= 0 && mode < validmodecnt && validmode[mode].bpp != curbpp);
-                            if (mode >= 0 && mode < validmodecnt && validmode[mode].bpp == curbpp)
-                                newvidmode = mode;
-                        }
-                        break;
-
-                    case 2: // Filtering — toggle nearest/bilinear.
+                    case 1: /* Filtering — toggle nearest/bilinear */
                         xbox_bilinear = !xbox_bilinear;
                         xbox_apply_filter();
                         break;
 
-                    case 3: // Apply changes.
-                        if (newvidmode != curvidmode) {
-                            int pxdim=xdim, pydim=ydim, pfs=fullscreen, pbpp=bpp;
+                    case 2: /* Brightness bar */
+                        break;
 
-                            if (setgamemode(SETGAMEMODE_FULLSCREEN(validmode[newvidmode].display, validmode[newvidmode].fs),
-                                    validmode[newvidmode].xdim, validmode[newvidmode].ydim, validmode[newvidmode].bpp) < 0) {
-                                if (setgamemode(pfs, pxdim, pydim, pbpp) < 0) {
-                                    gameexit("Failed restoring old video mode.");
-                                }
-                            } else {
-                                curvidmode = newvidmode;
-                                ScreenMode = validmode[newvidmode].fs;
-                                ScreenDisplay = validmode[newvidmode].display;
-                                ScreenWidth = validmode[newvidmode].xdim;
-                                ScreenHeight = validmode[newvidmode].ydim;
-                                ScreenBPP = validmode[newvidmode].bpp;
-                                onvideomodechange();
+                    case 3: /* Apply Changes */
+                        if (xbox_res_pending == xbox_res_mode) {
+                            /* No change — just acknowledge */
+                            xbox_apply_msg = 1;
+                        } else {
+                            /* Save new mode and prompt restart */
+                            xbox_res_mode = xbox_res_pending;
+                            switch (xbox_res_mode) {
+                            case 0:
+                                DisplayWidth = 640;  DisplayHeight = 480;
+                                ScreenWidth = 640;   ScreenHeight = 480;
+                                break;
+                            case 1:
+                                DisplayWidth = 1280; DisplayHeight = 720;
+                                ScreenWidth = 854;   ScreenHeight = 480;
+                                break;
+                            case 2:
+                                DisplayWidth = 1280; DisplayHeight = 720;
+                                ScreenWidth = 1280;  ScreenHeight = 720;
+                                break;
                             }
+                            CONFIG_WriteSetup();
+                            xbox_apply_msg = 2;
+                            cmenu(2030); /* restart prompt */
                         }
                         break;
-
-                    case 4: // Brightness.
-                        break;
                 }
-            }
 
-            menutext(c,50,0,0,"RENDERER");
-            gametext(c+154,50-8,validmode[newvidmode].bpp==32 ? "POLYMOST" : "SOFTWARE",0,2+8+16);
-
-            menutext(c,66,0,validmode[newvidmode].bpp==32,"RESOLUTION");
-            snprintf(buf,sizeof(buf),"%d X %d",validmode[newvidmode].xdim,validmode[newvidmode].ydim);
-            gametext(c+154,66-8,buf,0,2+8+16);
-
-            menutext(c,82,0,0,"FILTERING");
-            {
-                extern int xbox_bilinear;
-                gametext(c+154,82-8,xbox_bilinear ? "BILINEAR" : "NEAREST",0,2+8+16);
-            }
-
-            menutext(c+16,50+16*2+22,0,newvidmode==curvidmode,"APPLY CHANGES");
-
-            menutext(c,128,SHX(-6),PHX(-6),"BRIGHTNESS");
-            {
-                short ss = ud.brightness;
-                bar(c+167,128,&ss,8,x==4,SHX(-6),PHX(-6));
-                if(x==4) {
-                    ud.brightness = ss;
-                    setbrightness(ud.brightness>>2,&ps[myconnectindex].palette[0],0);
+                /* Draw menu items */
+                {
+                    int rp = (xbox_res_pending >= 0 && xbox_res_pending < num_res_modes)
+                        ? xbox_res_pending : xbox_res_mode;
+                    menutext(c,50,0,res_disabled,"RESOLUTION");
+                    if (res_disabled)
+                        gametext(c+154,50-8,"480I (SD CABLE)",0,2+8+16);
+                    else
+                        gametext(c+154,50-8,res_labels[rp],0,2+8+16);
                 }
+
+                menutext(c,66,0,0,"FILTERING");
+                gametext(c+154,66-8,xbox_bilinear ? "BILINEAR" : "NEAREST",0,2+8+16);
+
+                menutext(c,82,SHX(-6),PHX(-6),"BRIGHTNESS");
+                {
+                    short ss = ud.brightness;
+                    bar(c+167,82,&ss,8,x==2,SHX(-6),PHX(-6));
+                    if(x==2) {
+                        ud.brightness = ss;
+                        setbrightness(ud.brightness>>2,&ps[myconnectindex].palette[0],0);
+                    }
+                }
+
+                menutext(c,98,0,0,"APPLY CHANGES");
+                if (xbox_apply_msg == 1)
+                    gametext(160,178,"No changes to apply.",0,2+8+16);
+                else if (xbox_apply_msg == 2)
+                    gametext(160,178,"Saved. Restart to apply.",0,2+8+16);
             }
 #else
             {
@@ -3985,6 +4011,33 @@ VOLUME_ALL_40x:
             }
 
             break;
+
+#ifdef _XBOX
+        case 2030: /* Restart to apply resolution change? */
+            c = 320>>1;
+            gametext(c,90,"Restart to apply resolution?",0,2+8+16);
+            gametext(c,99,"(Y/N)",0,2+8+16);
+
+            if(uinfo.button0 || KB_KeyPressed(sc_Y))
+            {
+                KB_FlushKeyboardQueue();
+                gameexit(" ");
+            }
+
+            x = probe(186,124,0,0);
+            if(x == -1 || KB_KeyPressed(sc_N))
+            {
+                KB_ClearKeyDown(sc_N);
+                /* Config already saved — will take effect next launch.
+                 * Keep xbox_res_pending at the saved value so the menu
+                 * continues to show what's queued for next restart. */
+                xbox_apply_msg = 2; /* show "Saved. Restart to apply." */
+                cmenu(203);
+                probey = 3; /* highlight Apply Changes */
+            }
+
+            break;
+#endif
 
         case 601:
             displayfragbar();

@@ -214,6 +214,44 @@ static int global_frame_num = 0;   // monotonic frame counter
 static int draw_since_sync = 0;    // draws since last GPU sync (push buffer overflow prevention)
 static int frame_2d_count = 0;     // per-frame non-perspective (rotatesprite/HUD) draws
 static int frame_depthoff_count = 0; // per-frame draws with depth test disabled
+static int frame_state_skip_count = 0; // per-frame state writes skipped by dirty tracking
+
+// ---- GPU state cache (dirty-bit tracking to skip redundant NV2A writes) ----
+// Tracks what was last written to the GPU so we can skip unchanged state.
+// Reset at start of each frame (glClear) to ensure clean baseline.
+static struct {
+	// Shader constants
+	float mvp[16];              // c[0]-c[3]
+	float colour[4];            // c[4]
+	float texscale[2];          // c[6].xy
+	int constants_valid;        // 0 = must write all constants
+
+	// Texture binding
+	uintptr_t tex_addr;         // GPU address of bound texture
+	int tex_swizzled;
+	int tex_alloc_w, tex_alloc_h;
+	int tex_width, tex_height;
+	uint32_t tex_pitch;
+	uint32_t tex_filter;
+	uint32_t tex_wrap;
+	int tex_valid;              // 0 = must write texture state
+
+	// Alpha test
+	int alpha_test_enabled;
+	int alpha_ref;
+	int alpha_valid;
+
+	// Blend / depth / cull
+	int blend_enabled;
+	uint32_t blend_sfactor, blend_dfactor;
+	int depth_test_enabled;
+	uint32_t depth_func;
+	int depth_mask;
+	int cull_enabled;
+	uint32_t front_face;
+	uint32_t cull_face;
+	int renderstate_valid;
+} gpu_cache;
 
 
 // ---- Vertex attrib pointer state ----
@@ -501,17 +539,24 @@ static void xbox_do_frame_start(void)
 	// Per-frame draw stats (log first 60 frames only — periodic logging
 	// causes disk I/O stalls that produce visible hitching every few seconds)
 	if (frame_number > 0 && frame_number <= 60) {
-		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d 2d=%d depthoff=%d tex=%d vbo=%d\n",
+		xbox_log("Xbox: FRAME %d end: draws=%d skips=%d clips=%d 2d=%d depthoff=%d tex=%d vbo=%d stskip=%d\n",
 			frame_number - 1, frame_draw_count, frame_skip_count, frame_clip_count,
 			frame_2d_count, frame_depthoff_count,
-			total_texture_bytes, vbo_pool_offset);
+			total_texture_bytes, vbo_pool_offset, frame_state_skip_count);
 	}
 	frame_draw_count = 0;
 	frame_skip_count = 0;
 	frame_clip_count = 0;
 	frame_2d_count = 0;
 	frame_depthoff_count = 0;
+	frame_state_skip_count = 0;
 	global_frame_num = frame_number;
+
+	// Invalidate GPU state cache at frame start so first draw writes everything
+	gpu_cache.constants_valid = 0;
+	gpu_cache.tex_valid = 0;
+	gpu_cache.alpha_valid = 0;
+	gpu_cache.renderstate_valid = 0;
 	clear_frame_number = ++frame_number;
 
 	draw_since_sync = 0;  // reset since pb_reset was just called
@@ -2027,91 +2072,186 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 
 		uint32_t *p = pb_begin();
 
-		// -- Shader constants c[0]-c[6] --
-		p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_ID, 96);
-		pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 28);
-		memcpy(p, mvp, 16 * 4); p += 16;                      // c[0]-c[3]: MVP
-		memcpy(p, gl_uniforms.colour, 4 * 4); p += 4;          // c[4]: colour
-		{                                                        // c[5]: wclamp
-			static const float c5[4] = { 0.0001f, 1.0f, 0.0f, 0.0f };
-			memcpy(p, c5, 4 * 4); p += 4;
-		}
-		{                                                        // c[6]: texscale
-			float c6[4] = { cur_texscale[0], cur_texscale[1], 0.0f, 0.0f };
-			memcpy(p, c6, 4 * 4); p += 4;
-		}
-
-		// -- Texture stage 0 --
-		if (tex && tex->addr) {
-			uint32_t filter_val = xbox_tex_filter(tex->min_filter, tex->mag_filter);
-			uint32_t wrap_val = xbox_tex_wrap(tex->wrap_s, tex->wrap_t);
-			if (tex->swizzled) {
-				p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
-					(DWORD)(uintptr_t)tex->addr & 0x03ffffff,
-					xbox_tex_format_argb8_swizzled(tex->alloc_w, tex->alloc_h));
-				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0),
-					tex->pitch << 16);
-				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
-					(tex->alloc_w << 16) | tex->alloc_h);
-				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), wrap_val);
+		// -- Shader constants c[0]-c[6] (dirty-tracked) --
+		// Only re-upload when MVP, colour, or texscale actually changed.
+		{
+			int need_constants = !gpu_cache.constants_valid
+				|| memcmp(gpu_cache.mvp, mvp, 16 * 4) != 0
+				|| memcmp(gpu_cache.colour, gl_uniforms.colour, 4 * 4) != 0
+				|| gpu_cache.texscale[0] != cur_texscale[0]
+				|| gpu_cache.texscale[1] != cur_texscale[1];
+			if (need_constants) {
+				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_ID, 96);
+				pb_push(p++, NV20_TCL_PRIMITIVE_3D_VP_UPLOAD_CONST_X, 28);
+				memcpy(p, mvp, 16 * 4); p += 16;              // c[0]-c[3]: MVP
+				memcpy(p, gl_uniforms.colour, 4 * 4); p += 4;  // c[4]: colour
+				{                                                // c[5]: wclamp
+					static const float c5[4] = { 0.0001f, 1.0f, 0.0f, 0.0f };
+					memcpy(p, c5, 4 * 4); p += 4;
+				}
+				{                                                // c[6]: texscale
+					float c6[4] = { cur_texscale[0], cur_texscale[1], 0.0f, 0.0f };
+					memcpy(p, c6, 4 * 4); p += 4;
+				}
+				memcpy(gpu_cache.mvp, mvp, 16 * 4);
+				memcpy(gpu_cache.colour, gl_uniforms.colour, 4 * 4);
+				gpu_cache.texscale[0] = cur_texscale[0];
+				gpu_cache.texscale[1] = cur_texscale[1];
+				gpu_cache.constants_valid = 1;
 			} else {
-				p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
-					(DWORD)(uintptr_t)tex->addr & 0x03ffffff,
-					xbox_tex_format_argb8());
-				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0),
-					tex->pitch << 16);
-				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
-					(tex->width << 16) | tex->height);
-				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), 0x00030303);
+				frame_state_skip_count++;
 			}
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_ENABLE(0), 0x4003ffc0);
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_FILTER(0), filter_val);
-		} else if (null_texture_addr) {
-			p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
-				(DWORD)(uintptr_t)null_texture_addr & 0x03ffffff,
-				xbox_tex_format_argb8_swizzled(NULL_TEX_SIZE, NULL_TEX_SIZE));
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0), NULL_TEX_PITCH << 16);
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
-				(NULL_TEX_SIZE << 16) | NULL_TEX_SIZE);
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), 0x00030303);
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_ENABLE(0), 0x4003ffc0);
-			p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_FILTER(0), 0x04074000);
 		}
 
-		// -- Alpha test --
-		if (gl_uniforms.alphacut > 0.0f) {
-			p = pb_push1(p, NV097_SET_ALPHA_TEST_ENABLE, 1);
-			p = pb_push1(p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER);
-			int ref = (int)(gl_uniforms.alphacut * 255.0f);
-			if (ref > 255) ref = 255;
-			if (ref < 0) ref = 0;
-			p = pb_push1(p, NV097_SET_ALPHA_REF, ref);
-		} else {
-			p = pb_push1(p, NV097_SET_ALPHA_TEST_ENABLE, 0);
+		// -- Texture stage 0 (dirty-tracked) --
+		{
+			uintptr_t new_addr = 0;
+			int new_swizzled = 0;
+			int new_aw = 0, new_ah = 0, new_w = 0, new_h = 0;
+			uint32_t new_pitch = 0, new_filter = 0, new_wrap = 0;
+
+			if (tex && tex->addr) {
+				new_addr = (uintptr_t)tex->addr;
+				new_swizzled = tex->swizzled;
+				new_aw = tex->alloc_w; new_ah = tex->alloc_h;
+				new_w = tex->width; new_h = tex->height;
+				new_pitch = tex->pitch;
+				new_filter = xbox_tex_filter(tex->min_filter, tex->mag_filter);
+				new_wrap = tex->swizzled ? xbox_tex_wrap(tex->wrap_s, tex->wrap_t) : 0x00030303;
+			} else if (null_texture_addr) {
+				new_addr = (uintptr_t)null_texture_addr;
+				new_swizzled = 1;
+				new_aw = NULL_TEX_SIZE; new_ah = NULL_TEX_SIZE;
+				new_w = NULL_TEX_SIZE; new_h = NULL_TEX_SIZE;
+				new_pitch = NULL_TEX_PITCH;
+				new_filter = 0x04074000;
+				new_wrap = 0x00030303;
+			}
+
+			int need_tex = !gpu_cache.tex_valid
+				|| gpu_cache.tex_addr != new_addr
+				|| gpu_cache.tex_swizzled != new_swizzled
+				|| gpu_cache.tex_alloc_w != new_aw
+				|| gpu_cache.tex_alloc_h != new_ah
+				|| gpu_cache.tex_filter != new_filter
+				|| gpu_cache.tex_wrap != new_wrap;
+
+			if (need_tex && new_addr) {
+				if (new_swizzled) {
+					p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
+						(DWORD)new_addr & 0x03ffffff,
+						xbox_tex_format_argb8_swizzled(new_aw, new_ah));
+					p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0),
+						new_pitch << 16);
+					p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
+						(new_aw << 16) | new_ah);
+					p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), new_wrap);
+				} else {
+					p = pb_push2(p, NV20_TCL_PRIMITIVE_3D_TX_OFFSET(0),
+						(DWORD)new_addr & 0x03ffffff,
+						xbox_tex_format_argb8());
+					p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_PITCH(0),
+						new_pitch << 16);
+					p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_NPOT_SIZE(0),
+						(new_w << 16) | new_h);
+					p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_WRAP(0), new_wrap);
+				}
+				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_ENABLE(0), 0x4003ffc0);
+				p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_TX_FILTER(0), new_filter);
+
+				gpu_cache.tex_addr = new_addr;
+				gpu_cache.tex_swizzled = new_swizzled;
+				gpu_cache.tex_alloc_w = new_aw;
+				gpu_cache.tex_alloc_h = new_ah;
+				gpu_cache.tex_width = new_w;
+				gpu_cache.tex_height = new_h;
+				gpu_cache.tex_pitch = new_pitch;
+				gpu_cache.tex_filter = new_filter;
+				gpu_cache.tex_wrap = new_wrap;
+				gpu_cache.tex_valid = 1;
+			} else if (need_tex) {
+				// Texture became NULL — invalidate cache so next textured draw re-sets it
+				gpu_cache.tex_valid = 0;
+			} else {
+				frame_state_skip_count++;
+			}
 		}
 
-		// -- Render state: blend, depth, cull --
-		p = pb_push1(p, NV097_SET_BLEND_ENABLE, gl_state.blend_enabled);
-		if (gl_state.blend_enabled) {
-			p = pb_push1(p, NV097_SET_BLEND_FUNC_SFACTOR, (uint32_t)gl_state.blend_sfactor);
-			p = pb_push1(p, NV097_SET_BLEND_FUNC_DFACTOR, (uint32_t)gl_state.blend_dfactor);
+		// -- Alpha test (dirty-tracked) --
+		{
+			int new_alpha_en = (gl_uniforms.alphacut > 0.0f) ? 1 : 0;
+			int new_alpha_ref = 0;
+			if (new_alpha_en) {
+				new_alpha_ref = (int)(gl_uniforms.alphacut * 255.0f);
+				if (new_alpha_ref > 255) new_alpha_ref = 255;
+				if (new_alpha_ref < 0) new_alpha_ref = 0;
+			}
+			int need_alpha = !gpu_cache.alpha_valid
+				|| gpu_cache.alpha_test_enabled != new_alpha_en
+				|| (new_alpha_en && gpu_cache.alpha_ref != new_alpha_ref);
+			if (need_alpha) {
+				if (new_alpha_en) {
+					p = pb_push1(p, NV097_SET_ALPHA_TEST_ENABLE, 1);
+					p = pb_push1(p, NV097_SET_ALPHA_FUNC, NV097_SET_ALPHA_FUNC_V_GREATER);
+					p = pb_push1(p, NV097_SET_ALPHA_REF, new_alpha_ref);
+				} else {
+					p = pb_push1(p, NV097_SET_ALPHA_TEST_ENABLE, 0);
+				}
+				gpu_cache.alpha_test_enabled = new_alpha_en;
+				gpu_cache.alpha_ref = new_alpha_ref;
+				gpu_cache.alpha_valid = 1;
+			} else {
+				frame_state_skip_count++;
+			}
 		}
-		p = pb_push1(p, NV097_SET_DEPTH_TEST_ENABLE, gl_state.depth_test_enabled);
-		if (gl_state.depth_test_enabled) {
-			p = pb_push1(p, NV097_SET_DEPTH_FUNC, (uint32_t)gl_state.depth_func);
-		}
-		p = pb_push1(p, NV097_SET_DEPTH_MASK, gl_state.depth_mask ? 1 : 0);
-		p = pb_push1(p, NV097_SET_CULL_FACE_ENABLE, gl_state.cull_enabled);
-		if (gl_state.cull_enabled) {
+
+		// -- Render state: blend, depth, cull (dirty-tracked) --
+		{
 			uint32_t nv_front = (gl_state.front_face == GL_CW)
 				? NV097_SET_FRONT_FACE_V_CW : NV097_SET_FRONT_FACE_V_CCW;
-			p = pb_push1(p, NV097_SET_FRONT_FACE, nv_front);
-			p = pb_push1(p, NV097_SET_CULL_FACE, (uint32_t)gl_state.cull_face);
+			int dm = gl_state.depth_mask ? 1 : 0;
+			int need_rs = !gpu_cache.renderstate_valid
+				|| gpu_cache.blend_enabled != gl_state.blend_enabled
+				|| (gl_state.blend_enabled && (gpu_cache.blend_sfactor != (uint32_t)gl_state.blend_sfactor
+					|| gpu_cache.blend_dfactor != (uint32_t)gl_state.blend_dfactor))
+				|| gpu_cache.depth_test_enabled != gl_state.depth_test_enabled
+				|| (gl_state.depth_test_enabled && gpu_cache.depth_func != (uint32_t)gl_state.depth_func)
+				|| gpu_cache.depth_mask != dm
+				|| gpu_cache.cull_enabled != gl_state.cull_enabled
+				|| (gl_state.cull_enabled && (gpu_cache.front_face != nv_front
+					|| gpu_cache.cull_face != (uint32_t)gl_state.cull_face));
+			if (need_rs) {
+				p = pb_push1(p, NV097_SET_BLEND_ENABLE, gl_state.blend_enabled);
+				if (gl_state.blend_enabled) {
+					p = pb_push1(p, NV097_SET_BLEND_FUNC_SFACTOR, (uint32_t)gl_state.blend_sfactor);
+					p = pb_push1(p, NV097_SET_BLEND_FUNC_DFACTOR, (uint32_t)gl_state.blend_dfactor);
+				}
+				p = pb_push1(p, NV097_SET_DEPTH_TEST_ENABLE, gl_state.depth_test_enabled);
+				if (gl_state.depth_test_enabled) {
+					p = pb_push1(p, NV097_SET_DEPTH_FUNC, (uint32_t)gl_state.depth_func);
+				}
+				p = pb_push1(p, NV097_SET_DEPTH_MASK, dm);
+				p = pb_push1(p, NV097_SET_CULL_FACE_ENABLE, gl_state.cull_enabled);
+				if (gl_state.cull_enabled) {
+					p = pb_push1(p, NV097_SET_FRONT_FACE, nv_front);
+					p = pb_push1(p, NV097_SET_CULL_FACE, (uint32_t)gl_state.cull_face);
+				}
+				gpu_cache.blend_enabled = gl_state.blend_enabled;
+				gpu_cache.blend_sfactor = (uint32_t)gl_state.blend_sfactor;
+				gpu_cache.blend_dfactor = (uint32_t)gl_state.blend_dfactor;
+				gpu_cache.depth_test_enabled = gl_state.depth_test_enabled;
+				gpu_cache.depth_func = (uint32_t)gl_state.depth_func;
+				gpu_cache.depth_mask = dm;
+				gpu_cache.cull_enabled = gl_state.cull_enabled;
+				gpu_cache.front_face = nv_front;
+				gpu_cache.cull_face = (uint32_t)gl_state.cull_face;
+				gpu_cache.renderstate_valid = 1;
+			} else {
+				frame_state_skip_count++;
+			}
 		}
 
-		// -- Vertex attribute pointers (VBO offset changes every draw) --
-		// Note: attrib_state[].enabled checks removed; polymost always uses
-		// vertex + texcoord, and Xbox skips glEnable/DisableVertexAttribArray.
+		// -- Vertex attribute pointers (always written — VBO offset changes every draw) --
 		{
 			void *vbo_base = vbo->gpu_addr;
 			{
@@ -2601,6 +2741,11 @@ void xbox_pbkit_shutdown_for_software(void)
 	frame_clip_count = 0;
 	frame_2d_count = 0;
 	frame_depthoff_count = 0;
+	frame_state_skip_count = 0;
+	gpu_cache.constants_valid = 0;
+	gpu_cache.tex_valid = 0;
+	gpu_cache.alpha_valid = 0;
+	gpu_cache.renderstate_valid = 0;
 	xbox_next_id = 1;
 	tex_free_count = 0;
 

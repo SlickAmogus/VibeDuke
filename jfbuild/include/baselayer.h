@@ -42,6 +42,7 @@ extern int mousex, mousey, mouseb;
 // joystick
 extern int joyaxis[8], joyb;
 extern char joynumaxes, joynumbuttons;
+void joyRumble(int low_freq, int high_freq, int duration_ms);
 
 
 
