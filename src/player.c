@@ -2483,6 +2483,9 @@ void processinput(short snum)
         {
             if(ud.recstat == 1) closedemowrite();
             sound(PIPEBOMB_EXPLODE);
+#ifdef _XBOX
+            if (xbox_vibration) joyRumble(65535, 65535, 600);
+#endif
             p->pals[0] = 64;
             p->pals[1] = 64;
             p->pals[2] = 64;

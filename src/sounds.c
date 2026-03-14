@@ -655,6 +655,26 @@ int xyzsound(short num,short i,int x,int y,int z)
      * Scale distances up by 1.5x so the original distance model
      * isn't blown out by the amplification. */
     sndist = sndist * 3 / 2;
+
+    /* Boss footstep/roam rumble: scale with proximity, max half intensity */
+    {
+        extern int xbox_vibration;
+        if (xbox_vibration && (num == BOS1_WALK || num == BOS1_ROAM ||
+            num == BOS2_ROAM || num == BOS3_ROAM || num == BOS4_ROAM))
+        {
+            /* sndist range: ~6720 (closest) to ~31444 (max audible).
+             * Map to rumble: 32767 (half max) at closest, 0 at max distance. */
+            int rumble_dist = sndist * 2 / 3; /* undo Xbox 1.5x compensation for rumble calc */
+            int max_dist = 31444;
+            int min_dist = (255 - LOUDESTVOLUME) << 6; /* 6720 */
+            if (rumble_dist < min_dist) rumble_dist = min_dist;
+            if (rumble_dist < max_dist) {
+                int intensity = 32767 * (max_dist - rumble_dist) / (max_dist - min_dist);
+                if (intensity > 32767) intensity = 32767;
+                if (intensity > 0) joyRumble(intensity, intensity / 2, 200);
+            }
+        }
+    }
 #endif
 
     if( soundm[num]&1 )
