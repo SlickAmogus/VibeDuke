@@ -56,7 +56,7 @@ static SDL_Surface *sdl_surface;	// For non-GL 8-bit mode output.
 static SDL_Surface *sdl_appicon;
 static int usesdlrenderer = 0;
 #ifdef _XBOX
-int xbox_bilinear = 0;  /* 0=nearest, 1=bilinear upscaling */
+int xbox_bilinear = 1;  /* 0=nearest, 1=bilinear — matches gltexfiltermode=5 default */
 #endif
 static unsigned char *frame;
 static float curshadergamma = 1.f, cursysgamma = -1.f;

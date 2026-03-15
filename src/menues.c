@@ -2255,6 +2255,28 @@ if (!VOLUMEALL) {
 
         {
             int io, ii, yy, d=c+160+40, enabled;
+
+#ifdef _XBOX
+            /* Xbox: remove mouse/keyboard-only options */
+            static const char *opts[] = {
+                "Crosshair",
+                "Level stats",
+                "Status bar size",
+                "-",
+                "Auto-aiming",
+                "Auto weapon switch",
+                "-",
+                "Screen size",
+                "Detail",
+                "Shadows",
+                "Screen tilting",
+                "-",
+                "Record demo",
+                NULL
+            };
+            /* Map Xbox io positions back to original switch case numbers */
+            static const int case_map[] = {0, 1, 2, 6, 8, 9, 10, 11, 12, 13};
+#else
             static const char *opts[] = {
                 "Crosshair",
                 "Level stats",
@@ -2276,6 +2298,7 @@ if (!VOLUMEALL) {
                 "Show startup window",
                 NULL
             };
+#endif
 
             yy = 31;
             for (ii=io=0; opts[ii]; ii++) {
@@ -2287,7 +2310,11 @@ if (!VOLUMEALL) {
                 io++;
             }
 
+#ifdef _XBOX
+            onbar = (probey == 2 || probey == 5);
+#else
             onbar = (probey == 2 || probey == 9);
+#endif
             x = probesm(c,yy+5,0,io);
 
             if (x == -1) { cmenu(200); break; }
@@ -2299,7 +2326,11 @@ if (!VOLUMEALL) {
                     continue;
                 }
                 enabled = 1;
+#ifdef _XBOX
+                switch (case_map[io]) {
+#else
                 switch (io) {
+#endif
                     case 0:  if (x==io) ud.crosshair = 1-ud.crosshair;
                              gametextpal(d,yy, ud.crosshair ? "On" : "Off", 0, 0); break;
                     case 1:  if (x==io) ud.levelstats = 1-ud.levelstats;
@@ -2432,7 +2463,7 @@ if (!VOLUMEALL) {
         c = 50;
 
         onbar = (probey < 2) ? 1 : 0;
-        x = probe(24,c,20,5);
+        x = probe(24,c,20,6);
 
         switch (x) {
         case -1:
@@ -2452,6 +2483,10 @@ if (!VOLUMEALL) {
             CONFIG_SetJoystickDefaults(2);
             CONFIG_SetXboxJoystickTuning();
             changesmade = 2;
+            break;
+
+        case 5:
+            cmenu(223);
             break;
         }
 
@@ -2491,6 +2526,10 @@ if (!VOLUMEALL) {
 
         /* Reset Defaults */
         gametextpal(40,c+20+20+20+20, "Reset Defaults", 0, 2);
+
+        /* Set Controls */
+        gametextpal(40,c+20+20+20+20+20, "Set Controls", 0, 2);
+
         if (changesmade == 2)
             gametext(160,178,"Defaults applied",0,2+8+16);
         }
@@ -2613,6 +2652,9 @@ if (!VOLUMEALL) {
                     case 1: /* Filtering — toggle nearest/bilinear */
                         xbox_bilinear = !xbox_bilinear;
                         xbox_apply_filter();
+                        /* Also update polymost 3D texture filtering */
+                        gltexfiltermode = xbox_bilinear ? 5 : 0;
+                        gltexapplyprops();
                         break;
 
                     case 2: /* Brightness bar */
@@ -3529,9 +3571,107 @@ if (!VOLUMEALL) {
             sprintf(buf,"Page %d of %d", 1+(current_menu-220), (joynumaxes+3)/4);
             gametext(320-100,158,buf,0,2+8+16);
         }
-        break;      
+        break;
     }
-        
+
+#ifdef _XBOX
+    case 223: {
+        /* "Set Controls" wizard — cycle through game functions,
+         * asking the user to press a button for each one.
+         * Start = skip, Guide/L3/R3 ignored. */
+        static int sc_step = -1;   /* -1 = uninitialised */
+        static int sc_prev_jb;
+        static int sc_done_frames;
+
+        /* Functions to map (ordered by importance) */
+        static const int sc_funcs[] = {
+            gamefunc_Fire,
+            gamefunc_Open,
+            gamefunc_Jump,
+            gamefunc_Crouch,
+            gamefunc_Run,
+            gamefunc_Quick_Kick,
+            gamefunc_Next_Weapon,
+            gamefunc_Previous_Weapon,
+            gamefunc_Inventory,
+            gamefunc_Inventory_Left,
+            gamefunc_Inventory_Right,
+            gamefunc_Map,
+            gamefunc_Jetpack,
+            gamefunc_MedKit,
+        };
+        #define SC_NUM_FUNCS ((int)(sizeof(sc_funcs)/sizeof(sc_funcs[0])))
+
+        /* --- Initialise on first entry --- */
+        if (sc_step < 0) {
+            /* Clear all button single-click mappings */
+            for (i = 0; i < MAXJOYBUTTONS; i++) {
+                JoystickFunctions[i][0] = -1;
+                CONTROL_MapButton(-1, i, 0, controldevice_joystick);
+            }
+            /* Keep Start = Show_Menu always */
+            JoystickFunctions[6][0] = gamefunc_Show_Menu;
+            CONTROL_MapButton(gamefunc_Show_Menu, 6, 0, controldevice_joystick);
+            sc_step = 0;
+            sc_prev_jb = joyb;   /* ignore buttons held on entry */
+            sc_done_frames = 0;
+        }
+
+        /* --- Draw --- */
+        rotatesprite(320<<15,10<<16,65536L,0,MENUBAR,16,0,10,0,0,xdim-1,ydim-1);
+        menutext(320>>1,15,0,0,"SET CONTROLS");
+
+        if (sc_step < SC_NUM_FUNCS) {
+            /* Show current function */
+            strcpy(buf, CONFIG_FunctionNumToName(sc_funcs[sc_step]));
+            for (i = 0; buf[i]; i++) if (buf[i] == '_') buf[i] = ' ';
+
+            gametext(320>>1, 70, "PRESS A BUTTON FOR", 0, 2+8+16);
+            menutext(320>>1, 90, 0, 0, buf);
+
+            sprintf(buf, "%d of %d", sc_step + 1, SC_NUM_FUNCS);
+            gametext(320>>1, 120, buf, 0, 2+8+16);
+            gametext(320>>1, 140, "START TO SKIP", 0, 2+8+16);
+
+            /* --- Detect new button press --- */
+            {
+                int newly = joyb & ~sc_prev_jb;
+                int btn;
+                for (btn = 0; btn < 15 && newly; btn++) {
+                    if (!(newly & (1 << btn))) continue;
+                    /* Skip Guide(5), LeftStick(7), RightStick(8) */
+                    if (btn == 5 || btn == 7 || btn == 8) continue;
+
+                    if (btn == 6) {
+                        /* Start = skip this function */
+                        sound(EXITMENUSOUND);
+                        sc_step++;
+                    } else {
+                        /* Assign this button to the current function */
+                        JoystickFunctions[btn][0] = sc_funcs[sc_step];
+                        CONTROL_MapButton(sc_funcs[sc_step], btn, 0,
+                                          controldevice_joystick);
+                        sound(PISTOL_BODYHIT);
+                        sc_step++;
+                    }
+                    break;
+                }
+            }
+            sc_prev_jb = joyb;
+        } else {
+            /* All functions done — show confirmation briefly */
+            gametext(320>>1, 90, "CONTROLS SAVED!", 0, 2+8+16);
+            sc_done_frames++;
+            if (sc_done_frames > 60) {   /* ~1 second */
+                CONFIG_WriteSetup();
+                sc_step = -1;
+                cmenu(202);
+            }
+        }
+        break;
+    }
+#endif
+
         case 700:
             c = (320>>1)-120;
             rotatesprite(320<<15,19<<16,65536L,0,MENUBAR,16,0,10,0,0,xdim-1,ydim-1);

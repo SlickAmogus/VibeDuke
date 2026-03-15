@@ -144,6 +144,39 @@ static void BassBoostBuffer(void *buf, DWORD bytes)
     }
 }
 
+/* Stereo-to-surround upmix (Hafler principle).
+ * Extracts the stereo difference signal (L-R) from the front buffer and
+ * adds it to the surround buffer.  Center-panned content (lead melody,
+ * bass, dialog) cancels in L-R so stays in front only.  Stereo-spread
+ * content (reverb, panned instruments) creates ambient surround presence.
+ * Applied before amplification so the surround gain treats upmixed and
+ * direct surround content identically. */
+#define UPMIX_NUM 5   /* 5/10 = 50% of difference → surround */
+#define UPMIX_DEN 10
+
+static void UpmixStereoToSurround(void *front_buf, void *surround_buf, DWORD bytes)
+{
+    short *front = (short *)front_buf;
+    short *surround = (short *)surround_buf;
+    DWORD count = bytes / 2;   /* 16-bit samples */
+    DWORD i;
+
+    for (i = 0; i + 1 < count; i += 2) {
+        int fl = (int)front[i];        /* front left */
+        int fr = (int)front[i + 1];    /* front right */
+        int diff = fl - fr;            /* stereo difference */
+
+        /* SL gets +diff, SR gets -diff (decorrelated surround image) */
+        int sl = surround[i]     + diff * UPMIX_NUM / UPMIX_DEN;
+        int sr = surround[i + 1] - diff * UPMIX_NUM / UPMIX_DEN;
+
+        if (sl > 32767) sl = 32767; else if (sl < -32768) sl = -32768;
+        if (sr > 32767) sr = 32767; else if (sr < -32768) sr = -32768;
+        surround[i]     = (short)sl;
+        surround[i + 1] = (short)sr;
+    }
+}
+
 /* Feed low-frequency content from the front buffer into the LFE channel.
  * This gives explosions and music a subwoofer presence. */
 #define LFE_FEED_NUM  1   /* 1/3 of low-passed front signal → LFE */
@@ -582,6 +615,12 @@ static void PumpAudio(void)
     /* Bass boost on front buffer (before amplification, operates on raw mix) */
     if (fptr1 && fbytes1) BassBoostBuffer(fptr1, fbytes1);
     if (fptr2 && fbytes2) BassBoostBuffer(fptr2, fbytes2);
+
+    /* Upmix stereo front to surround (Hafler L-R difference extraction) */
+    if (surround) {
+        if (fptr1 && sptr1 && fbytes1) UpmixStereoToSurround(fptr1, sptr1, fbytes1);
+        if (fptr2 && sptr2 && fbytes2) UpmixStereoToSurround(fptr2, sptr2, fbytes2);
+    }
 
     /* Boost volume on all buffers */
     if (fptr1 && fbytes1) AmplifyBuffer(fptr1, fbytes1);
