@@ -2359,6 +2359,28 @@ void checkhitsprite(short i,short sn)
                             guts(&sprite[i], JIBS5, 1, myconnectindex);
                             guts(&sprite[i], JIBS6, 3, myconnectindex);
                             spritesound(SQUISHED, i);
+
+                            /* Credit the kill to the player who fired */
+                            {
+                                short owner = sprite[sn].owner;
+                                if (owner >= 0 && sprite[owner].picnum == APLAYER)
+                                    ps[sprite[owner].yvel].actors_killed++;
+                                else
+                                    ps[myconnectindex].actors_killed++;
+                            }
+
+                            /* ~39% chance of Duke jib voice line */
+                            if ((TRAND & 255) < 100) {
+                                static const short jib_snds[] = {
+                                    JIBBED_ACTOR1, JIBBED_ACTOR2, JIBBED_ACTOR3,
+                                    JIBBED_ACTOR4, JIBBED_ACTOR5, JIBBED_ACTOR6,
+                                    JIBBED_ACTOR7, JIBBED_ACTOR8, JIBBED_ACTOR9,
+                                    JIBBED_ACTOR10,JIBBED_ACTOR11,JIBBED_ACTOR12,
+                                    JIBBED_ACTOR13,JIBBED_ACTOR14,JIBBED_ACTOR15,
+                                };
+                                sound(jib_snds[TRAND % 15]);
+                            }
+
                             hittype[i].extra = -1;
                             deletesprite(i);
                             return;
