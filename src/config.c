@@ -698,9 +698,13 @@ int32 CONFIG_ReadSetup( void )
     ScreenBPP = 32;
     {
         extern int xbox_vibration;
+        extern int xbox_bloody_mess;
         int32 vib = xbox_vibration;
+        int32 bm = xbox_bloody_mess;
         SCRIPT_GetNumber( scripthandle, "Misc", "XboxVibration", &vib);
+        SCRIPT_GetNumber( scripthandle, "Misc", "XboxBloodyMess", &bm);
         xbox_vibration = vib;
+        xbox_bloody_mess = bm;
     }
 #endif
 
@@ -808,7 +812,9 @@ void CONFIG_WriteSetup( void )
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "XboxResMode",xbox_res_mode,false,false);
     {
         extern int xbox_vibration;
+        extern int xbox_bloody_mess;
         SCRIPT_PutNumber( scripthandle, "Misc", "XboxVibration",xbox_vibration,false,false);
+        SCRIPT_PutNumber( scripthandle, "Misc", "XboxBloodyMess",xbox_bloody_mess,false,false);
     }
 #endif
     SCRIPT_PutNumber( scripthandle, "Screen Setup", "MaxRefreshFreq",max(0,(int)getmaxrefreshfreq()),false,false);

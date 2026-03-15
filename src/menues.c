@@ -2434,8 +2434,12 @@ if (!VOLUMEALL) {
             break;
 
         case 4:
+#ifdef _XBOX
+            cmenu(224);
+#else
 #ifndef AUSTRALIA
             cmenu(10000);
+#endif
 #endif
             break;
         }
@@ -2445,10 +2449,14 @@ if (!VOLUMEALL) {
         menutext(160,c+18+18,0,0,"VIDEO SETTINGS");
         menutext(160,c+18+18+18,0,0,"INPUT SETTINGS");
         if (!NAM) {
+#ifdef _XBOX
+        menutext(160,c+18+18+18+18,0,0,"EXTRA OPTIONS");
+#else
 #ifndef AUSTRALIA
         menutext(160,c+18+18+18+18,0,0,"PARENTAL LOCK");
 #else
         menutext(160,c+18+18+18+18,0,1,"PARENTAL LOCK");
+#endif
 #endif
         }
         break;
@@ -3668,6 +3676,32 @@ if (!VOLUMEALL) {
                 cmenu(202);
             }
         }
+        break;
+    }
+
+    case 224: {
+        /* Extra Options submenu (replaces Parental Lock on Xbox) */
+        extern int xbox_bloody_mess;
+
+        rotatesprite(320<<15,19<<16,65536L,0,MENUBAR,16,0,10,0,0,xdim-1,ydim-1);
+        menutext(320>>1,24,0,0,"EXTRA OPTIONS");
+
+        c = 50;
+        onbar = 0;
+        x = probe(24,c,20,1);
+
+        switch (x) {
+        case -1:
+            cmenu(200);
+            probey = 4;
+            break;
+        case 0:
+            xbox_bloody_mess = 1 - xbox_bloody_mess;
+            break;
+        }
+
+        gametextpal(40,c, "Bloody Mess", 0, 2);
+        gametextpal(170,c, xbox_bloody_mess ? "On" : "Off", 0, 0);
         break;
     }
 #endif

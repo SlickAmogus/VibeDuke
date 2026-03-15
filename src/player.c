@@ -36,6 +36,7 @@ int32 lastcontroltime; //MED
 
 #ifdef _XBOX
 int xbox_vibration = 1;  /* 0=off, 1=on */
+int xbox_bloody_mess = 0; /* 0=off, 1=on — enemies always gib on death */
 #endif
 
 void setpal(struct player_struct *p)

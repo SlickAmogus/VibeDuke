@@ -2342,6 +2342,29 @@ void checkhitsprite(short i,short sn)
                     hittype[i].extra += sprite[sn].extra;
                     hittype[i].ang = sprite[sn].ang;
                     hittype[i].owner = sprite[sn].owner;
+
+#ifdef _XBOX
+                    /* Bloody Mess: force-gib humanoid enemies on lethal damage */
+                    {
+                        extern int xbox_bloody_mess;
+                        if (xbox_bloody_mess && badguy(&sprite[i]) &&
+                            PN != APLAYER && actortype[PN] == 0 &&
+                            hittype[i].extra >= 0 &&
+                            hittype[i].extra >= sprite[i].extra)
+                        {
+                            guts(&sprite[i], JIBS1, 1, myconnectindex);
+                            guts(&sprite[i], JIBS2, 2, myconnectindex);
+                            guts(&sprite[i], JIBS3, 3, myconnectindex);
+                            guts(&sprite[i], JIBS4, 2, myconnectindex);
+                            guts(&sprite[i], JIBS5, 1, myconnectindex);
+                            guts(&sprite[i], JIBS6, 3, myconnectindex);
+                            spritesound(SQUISHED, i);
+                            hittype[i].extra = -1;
+                            deletesprite(i);
+                            return;
+                        }
+                    }
+#endif
                 }
 
                 if(sprite[i].statnum == 10)
