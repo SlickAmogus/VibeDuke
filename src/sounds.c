@@ -38,6 +38,9 @@ Modifications for JonoF's port by Jonathon Fowler (jf@jonof.id.au)
 #include <io.h>
 #include "fx_man.h"
 
+/* Per-level sound diagnostic log budget — reset on each enterlevel */
+int xbox_snd_log_budget = 200; /* TEMP: high budget to capture entrance voice — reduce after fix */
+
 /* Sounds that should always play from the center channel in 5.1 surround.
  * This includes Duke's voice lines (already handled by soundm & 4), plus
  * Duke's weapon sounds, pain/grunt, landing, reloading, walking, breathing,
@@ -193,7 +196,10 @@ static int IsCenterChannelSound(short num)
 }
 
 /* Sounds that should sweep across the rear surround channels (SL→SR).
- * These are ambient flyover/war sounds for immersive atmosphere. */
+ * Only actual ambient flyover/war sounds — NOT Duke voice quotes.
+ * USER.CON redefines WAR_AMBIENCE5-10 as Duke entrance quotes
+ * (FORCE01, QUAKE06, TERMIN01, BORN01, NOBODY01, CHEW05) so those
+ * must NOT be swept — they need center channel routing via flag4. */
 static int IsSurroundSweepSound(short num)
 {
     switch (num) {
@@ -202,12 +208,6 @@ static int IsSurroundSweepSound(short num)
         case WAR_AMBIENCE2:
         case WAR_AMBIENCE3:
         case WAR_AMBIENCE4:
-        case WAR_AMBIENCE5:
-        case WAR_AMBIENCE6:
-        case WAR_AMBIENCE7:
-        case WAR_AMBIENCE8:
-        case WAR_AMBIENCE9:
-        case WAR_AMBIENCE10:
             return 1;
         default:
             return 0;
@@ -682,8 +682,22 @@ int xyzsound(short num,short i,int x,int y,int z)
 
         for(j=0;j<NUM_SOUNDS;j++)
           for(k=0;k<Sound[j].num;k++)
-            if( (Sound[j].num > 0) && (soundm[j]&4) )
+            if( (Sound[j].num > 0) && (soundm[j]&4)
+#ifdef _XBOX
+                && !IsSurroundSweepSound(j)  /* WAR_AMBIENCE has flag4 in CON but isn't Duke voice */
+#endif
+              )
+            {
+#ifdef _XBOX
+              { extern int xbox_snd_log_budget;
+                if (xbox_snd_log_budget > 0) {
+                    xbox_log("xyzsound: snd=%d BLOCKED by playing flag4 snd=%d\n", (int)num, (int)j);
+                    xbox_snd_log_budget--;
+                }
+              }
+#endif
               return -1;
+            }
     }
 
     cx = ps[screenpeek].oposx;
@@ -765,11 +779,6 @@ int xyzsound(short num,short i,int x,int y,int z)
         sndist = ((255-LOUDESTVOLUME)<<6);
 
 #ifdef _XBOX
-    /* Compensate for VOLUME_BOOST (4x) in driver_dsound_xbox.c.
-     * Scale distances up by 1.5x so the original distance model
-     * isn't blown out by the amplification. */
-    sndist = sndist * 3 / 2;
-
     /* Boss footstep/roam rumble: scale with proximity, max half intensity */
     {
         extern int xbox_vibration;
@@ -778,7 +787,7 @@ int xyzsound(short num,short i,int x,int y,int z)
         {
             /* sndist range: ~6720 (closest) to ~31444 (max audible).
              * Map to rumble: 32767 (half max) at closest, 0 at max distance. */
-            int rumble_dist = sndist * 2 / 3; /* undo Xbox 1.5x compensation for rumble calc */
+            int rumble_dist = sndist;
             int max_dist = 31444;
             int min_dist = (255 - LOUDESTVOLUME) << 6; /* 6720 */
             if (rumble_dist < min_dist) rumble_dist = min_dist;
@@ -816,6 +825,17 @@ int xyzsound(short num,short i,int x,int y,int z)
             FX_SetVoiceSurroundSweep( voice, 1 );
         else if ( (soundm[num] & 4) || IsCenterChannelSound(num) )
             FX_SetVoiceCenter( voice, 1 );
+        /* Log actual routing applied (sweep > center > positional) */
+        { extern int xbox_snd_log_budget;
+          if (xbox_snd_log_budget > 0) {
+              const char *route = "pos";
+              if (IsSurroundSweepSound(num)) route = "SWEEP";
+              else if ((soundm[num]&4) || IsCenterChannelSound(num)) route = "CENTER";
+              xbox_log("xyzsound: snd=%d v=%d [%s] f4=%d spr=%d ang=%d\n",
+                  num, voice, route, (soundm[num]&4)?1:0, (int)PN, (int)(sndang>>6));
+              xbox_snd_log_budget--;
+          }
+        }
 #endif
     }
     else Sound[num].lock--;
@@ -887,6 +907,16 @@ void sound(short num)
              FX_SetVoiceSurroundSweep( voice, 1 );
          else if ( (soundm[num] & 4) || IsCenterChannelSound(num) )
              FX_SetVoiceCenter( voice, 1 );
+         { extern int xbox_snd_log_budget;
+           if (xbox_snd_log_budget > 0) {
+               const char *route = "pos";
+               if (IsSurroundSweepSound(num)) route = "SWEEP";
+               else if ((soundm[num]&4) || IsCenterChannelSound(num)) route = "CENTER";
+               xbox_log("sound(): snd=%d v=%d [%s] f4=%d\n",
+                   num, voice, route, (soundm[num]&4)?1:0);
+               xbox_snd_log_budget--;
+           }
+         }
 #endif
 		 return;
 	 }
@@ -1005,11 +1035,6 @@ void pan3dsound(void)
 
         if(sndist < ((255-LOUDESTVOLUME)<<6) )
             sndist = ((255-LOUDESTVOLUME)<<6);
-
-#ifdef _XBOX
-        /* Compensate for VOLUME_BOOST (4x) — scale distances 1.5x */
-        sndist = sndist * 3 / 2;
-#endif
 
         FX_Pan3D(SoundOwner[j][k].voice,sndang>>6,sndist>>6);
     }

@@ -374,6 +374,16 @@ void cacheit(void)
             if (total == 0) {
                 break;
             }
+#ifdef _XBOX
+            /* Stop precaching once we hit the texture budget — remaining
+               textures will stream in on-demand via LRU eviction */
+            { extern int xbox_tex_over_budget(void);
+              if (xbox_tex_over_budget()) {
+                  xbox_log("cacheit: texture budget reached at %d/%d, rest will stream on-demand\n", done, total);
+                  break;
+              }
+            }
+#endif
             if (done == lastdone && total == lasttotal && (cycles++ & 1023) > 0) {
                 continue;
             }
@@ -1707,16 +1717,13 @@ int enterlevel(unsigned char g)
     if(ud.recstat != 2) stopmusic();
 
 #ifdef _XBOX
-    buildprintf("enterlevel: cacheit...\n");
-    xbox_log("enterlevel: cacheit...\n");
-#endif
-    cacheit();
-#ifdef _XBOX
-    buildprintf("enterlevel: cacheit done\n");
-    xbox_log("enterlevel: cacheit done\n");
-    xbox_preload_tiles();
+    { extern int xbox_snd_log_budget;
+      xbox_snd_log_budget = 30;  /* refresh sound diagnostic logging for this level */
+    }
 #endif
 
+    // Load music BEFORE precaching textures — music needs 2-5MB of heap,
+    // and texture precaching consumes physical pages that starve malloc.
     if(ud.recstat != 2)
     {
         music_select = (ud.volume_number*11) + ud.level_number;
@@ -1728,6 +1735,17 @@ int enterlevel(unsigned char g)
         xbox_log("enterlevel: playmusic done\n");
 #endif
     }
+
+#ifdef _XBOX
+    buildprintf("enterlevel: cacheit...\n");
+    xbox_log("enterlevel: cacheit...\n");
+#endif
+    cacheit();
+#ifdef _XBOX
+    buildprintf("enterlevel: cacheit done\n");
+    xbox_log("enterlevel: cacheit done\n");
+    xbox_preload_tiles();
+#endif
 
     if( (g&MODE_GAME) || (g&MODE_EOL) )
         ps[myconnectindex].gm = MODE_GAME;

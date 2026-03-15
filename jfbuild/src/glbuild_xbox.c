@@ -125,7 +125,8 @@ static struct xbox_texture {
 	int alloc_size;      // size in bytes of the contiguous allocation
 } texture_table[MAX_TEXTURES];
 static int total_texture_bytes = 0;  // total contiguous memory allocated for textures
-#define TEX_BUDGET_BYTES (12 * 1024 * 1024)  // proactive eviction threshold (was 6MB, raised to reduce thrashing)
+static int xbox_tex_alloc_failed = 0;  // set when MmAllocateContiguous fails (signals precache to stop)
+#define TEX_BUDGET_BYTES (8 * 1024 * 1024)  // proactive eviction threshold
 
 // Free list for recycling texture IDs deleted via glDeleteTextures.
 // Only explicitly-deleted IDs go here (not LRU-evicted ones), because
@@ -1033,6 +1034,7 @@ static void APIENTRY xbox_glTexImage2D(GLenum target, GLint level, GLint ifmt,
 					xbox_log("Xbox: tex alloc FAILED %dx%d (%d bytes) total=%d\n",
 						aw, ah, alloc_size, total_texture_bytes);
 				alloc_fail_count++;
+				xbox_tex_alloc_failed = 1;
 				return;
 			}
 		}
@@ -2292,7 +2294,7 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 		// DEBUG: set to 1 to skip all clipped draws (diagnostic for streaking)
 		#define SKIP_CLIPPED_DRAWS 0
 
-		if (need_clip) {
+		if (need_clip && mode != GL_LINES && mode != GL_POINTS) {
 			#if SKIP_CLIPPED_DRAWS
 			return; // diagnostic: skip clipped draws to test if streaks come from clipper
 			#endif
@@ -2401,6 +2403,8 @@ static void APIENTRY xbox_glDrawElements(GLenum mode, GLsizei count,
 				case GL_TRIANGLE_FAN:   nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLE_FAN; break;
 				case GL_TRIANGLE_STRIP: nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLE_STRIP; break;
 				case GL_TRIANGLES:      nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLES; break;
+				case GL_LINES:          nv_prim = NV097_SET_BEGIN_END_OP_LINES; break;
+				case GL_POINTS:         nv_prim = NV097_SET_BEGIN_END_OP_POINTS; break;
 				default:                nv_prim = NV097_SET_BEGIN_END_OP_TRIANGLES; break;
 			}
 
@@ -2666,6 +2670,11 @@ int xbox_gl_texture_valid(unsigned int glpic)
 	return (texture_table[glpic].allocated && texture_table[glpic].addr != NULL) ? 1 : 0;
 }
 
+int xbox_tex_over_budget(void)
+{
+	return (total_texture_bytes >= TEX_BUDGET_BYTES) || xbox_tex_alloc_failed;
+}
+
 // Shut down pbkit and release all GPU resources.
 // Called from setvideomode when switching back to 8-bit software mode.
 // After this, the PCRTC scanout is restored to the original framebuffer
@@ -2687,6 +2696,7 @@ void xbox_pbkit_shutdown_for_software(void)
 		memset(&texture_table[i], 0, sizeof(texture_table[i]));
 	}
 	total_texture_bytes = 0;
+	xbox_tex_alloc_failed = 0;
 
 	// Free buffer table entries (CPU-side copies)
 	for (int i = 0; i < MAX_BUFFERS; i++) {

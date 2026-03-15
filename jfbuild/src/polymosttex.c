@@ -655,8 +655,12 @@ static int pt_load_art(PTHead * pth)
 	if (!tex.pic) {
 #ifdef _XBOX
 		{ extern void xbox_log(const char *fmt, ...);
-		  xbox_log("pt_load_art: tex.pic malloc FAILED pic=%d %dx%d (%d bytes)\n",
-		      pth->picnum, tex.sizx, tex.sizy, (int)(tex.sizx * tex.sizy * sizeof(coltype))); }
+		  static int pt_fail_count = 0;
+		  if (pt_fail_count < 3)
+		      xbox_log("pt_load_art: tex.pic malloc FAILED pic=%d %dx%d (%d bytes)\n",
+		          pth->picnum, tex.sizx, tex.sizy, (int)(tex.sizx * tex.sizy * sizeof(coltype)));
+		  pt_fail_count++;
+		}
 #endif
 		return 0;
 	}
